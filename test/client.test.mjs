@@ -72,6 +72,16 @@ test("search sends the questions and top_k", async () => {
   assert.equal(out.results[0].pages[0].page, 2);
 });
 
+test("a retried search sends the same idempotency key", async () => {
+  const result = { object: "search", id: "srch_1", document_id: "doc_1", results: [] };
+  const { fetch, seen } = fake([503, {}], [200, result]);
+  const client = new PageSearch({ apiKey: "pis_live_x", fetch });
+  await client.search("doc_1", "q");
+  const keys = seen.map((r) => r.headers["Idempotency-Key"]);
+  assert.equal(keys.length, 2);
+  assert.ok(keys[0] && keys[0] === keys[1]);
+});
+
 test("iterDocuments follows the pages", async () => {
   const { fetch, seen } = fake(
     [200, { data: [DOC, { ...DOC, id: "doc_2" }], has_more: true }],

@@ -1,6 +1,6 @@
 // The Page Search API client: upload a PDF, then search its pages with up to 10 questions at once.
 
-export const VERSION = "0.1.0";
+export const VERSION = "0.1.1";
 export const DEFAULT_BASE_URL = "https://api.search.pageindex.ai/v1";
 const API_KEY_ENV = "PAGEINDEX_SEARCH_API_KEY";
 // Retried, after a short wait that doubles: the server was busy or briefly unreachable.
@@ -197,11 +197,19 @@ export class PageSearch {
    *
    * Without topK, each answer lists the pages likely to help: relevance 0.3 or more, or 0.2 or more when fewer
    * than 3 are, and possibly none. With it, exactly topK pages.
+   *
+   * Retries send the same idempotencyKey (a new one by default), so a search retried after a timeout is not run or
+   * charged twice; pass your own to make your own retries safe too.
    */
-  search(document: Document | string, questions: string | string[], options: { topK?: number } = {}): Promise<SearchResult> {
+  search(
+    document: Document | string, questions: string | string[], options: { topK?: number; idempotencyKey?: string } = {},
+  ): Promise<SearchResult> {
     const body: Record<string, unknown> = { questions: typeof questions === "string" ? [questions] : questions };
     if (options.topK !== undefined) body.top_k = options.topK;
-    return this.request<SearchResult>("POST", `/documents/${encodeURIComponent(id(document))}/search`, { json: body });
+    return this.request<SearchResult>("POST", `/documents/${encodeURIComponent(id(document))}/search`, {
+      json: body,
+      headers: { "Idempotency-Key": options.idempotencyKey ?? newKey() },
+    });
   }
 
   // Account
@@ -219,7 +227,9 @@ export class PageSearch {
   private async request<T>(
     method: string,
     path: string,
-    options: { query?: Record<string, string | number | undefined>; json?: unknown; body?: FormData } = {},
+    options: {
+      query?: Record<string, string | number | undefined>; json?: unknown; body?: FormData; headers?: Record<string, string>;
+    } = {},
   ): Promise<T> {
     const url = new URL(this.baseURL + path);
     for (const [name, value] of Object.entries(options.query ?? {})) {
@@ -228,6 +238,7 @@ export class PageSearch {
     const headers: Record<string, string> = {
       Authorization: `Bearer ${this.apiKey}`,
       "User-Agent": `pageindex-search-js/${VERSION}`,
+      ...options.headers,
     };
     let body: BodyInit | undefined = options.body;
     if (options.json !== undefined) {
@@ -254,6 +265,13 @@ export class PageSearch {
 
 function id(document: Document | string): string {
   return typeof document === "string" ? document : document.id;
+}
+
+/** A random idempotency key; Node 18 has no global crypto. */
+function newKey(): string {
+  const random = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto?.randomUUID;
+  if (random) return random.call(globalThis.crypto);
+  return Array.from({ length: 4 }, () => Math.random().toString(36).slice(2, 10)).join("");
 }
 
 function sleep(ms: number): Promise<void> {

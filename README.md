@@ -45,7 +45,7 @@ document.
 | --- | --- |
 | `new PageSearch({ apiKey, baseURL, timeout, maxRetries })` | The key defaults to `PAGEINDEX_SEARCH_API_KEY`; `timeout` is in milliseconds (default 120,000). |
 | `upload(file, { filename, wait })` | A path, or the file's bytes (`Uint8Array`, `ArrayBuffer`, `Blob`). Resolves to a `Document`, ready to search unless `wait: false`. |
-| `search(document, questions, { topK })` | Up to 10 questions. Each answer lists the pages likely to help (relevance 0.3 or more; 0.2 or more when fewer than 3 are; possibly none), or exactly `topK`. |
+| `search(document, questions, { topK, idempotencyKey })` | Up to 10 questions. Each answer lists the pages likely to help (relevance 0.3 or more; 0.2 or more when fewer than 3 are; possibly none), or exactly `topK`. A search retried after a timeout is not charged twice. |
 | `document(id)`, `documents({ limit, after })`, `iterDocuments()` | Your documents. |
 | `delete(document)` | Delete a document. |
 | `usage({ start, end })` | Uploads, searches and cost by day, your credit and stored pages. |
