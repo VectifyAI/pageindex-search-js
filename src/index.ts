@@ -272,8 +272,7 @@ export class PageSearch {
   /**
    * Asks up to 10 questions about a document. For each, the pages that help answer it, most relevant first.
    *
-   * Without topK, each answer lists the pages likely to help: relevance 0.3 or more, or 0.2 or more when fewer
-   * than 3 are, and possibly none. With it, exactly topK pages.
+   * Without topK, each answer lists the pages likely to help, possibly none. With it, exactly topK pages.
    *
    * Retries send the same idempotencyKey (a new one by default), so a search retried after a timeout is not run or
    * charged twice; pass your own to make your own retries safe too.
