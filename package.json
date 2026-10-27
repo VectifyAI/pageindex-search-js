@@ -1,0 +1,33 @@
+{
+  "name": "@pageindex/search",
+  "version": "0.1.0",
+  "description": "JavaScript client for Page Search API by PageIndex: find the pages of a PDF that answer your questions.",
+  "license": "MIT",
+  "author": "PageIndex <support@pageindex.ai>",
+  "homepage": "https://search.pageindex.ai",
+  "repository": { "type": "git", "url": "git+https://github.com/VectifyAI/pageindex-search-js.git" },
+  "bugs": "https://github.com/VectifyAI/pageindex-search-js/issues",
+  "keywords": ["pageindex", "search", "pdf", "rag", "llm", "retrieval"],
+  "type": "module",
+  "main": "./dist/cjs/index.js",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/esm/index.d.ts",
+  "exports": {
+    ".": {
+      "import": { "types": "./dist/esm/index.d.ts", "default": "./dist/esm/index.js" },
+      "require": { "types": "./dist/cjs/index.d.ts", "default": "./dist/cjs/index.js" }
+    }
+  },
+  "files": ["dist", "README.md", "LICENSE"],
+  "engines": { "node": ">=18" },
+  "sideEffects": false,
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.json && tsc -p tsconfig.cjs.json && echo '{\"type\": \"commonjs\"}' > dist/cjs/package.json",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "prepublishOnly": "npm test"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.4.0"
+  }
+}
