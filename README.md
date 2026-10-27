@@ -30,7 +30,7 @@ const result = await client.search(doc, [
 
 for (const answer of result.results) {
   console.log(answer.question);
-  for (const page of answer.pages) console.log(`  page ${page.page}: ${page.relevance.toFixed(2)}`);
+  for (const page of answer.pages) console.log(`  page ${page.page}: ${page.relevance}`);
 }
 
 console.log(`cost $${result.usage.cost_usd}, credit left $${result.usage.balance_usd}`);
