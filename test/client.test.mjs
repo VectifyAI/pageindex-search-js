@@ -54,6 +54,14 @@ test("a failed document rejects", async () => {
   await assert.rejects(client.upload(new Uint8Array([1])), { code: "document_failed", message: /Not a readable PDF/ });
 });
 
+test("an upload that cannot be read rejects with the document's reason", async () => {
+  const { fetch } = fake([422, { ...DOC, status: "failed", pages: null, error: "The PDF could not be read; it may be damaged." }]);
+  const client = new PageSearch({ apiKey: "pis_live_x", fetch });
+  await assert.rejects(client.upload(new Uint8Array([1])), {
+    status: 422, code: "document_failed", requestId: "req_x", message: "The PDF could not be read; it may be damaged.",
+  });
+});
+
 test("search sends the questions and top_k", async () => {
   const result = { object: "search", id: "srch_1", document_id: "doc_1", results: [{ question: "q", pages: [{ page: 2, relevance: 0.9 }] }] };
   const { fetch, seen } = fake([200, result]);

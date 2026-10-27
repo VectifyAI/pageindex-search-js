@@ -36,7 +36,7 @@ export interface SearchResult {
   id: string;
   document_id: string;
   results: Answer[]; // one for each question, in the order asked
-  failed_pages: number[]; // pages the model could not read; not charged
+  failed_pages: number[]; // pages that could not be read; not charged
   usage: { pages: number; questions: number; billable_pages: number; cost_usd: number; balance_usd: number };
   seconds: number;
 }
@@ -80,10 +80,7 @@ export class PageSearchError extends Error {
   readonly requestId?: string;
 
   constructor(message: string, options: { status?: number; code?: string; requestId?: string } = {}) {
-    const parts = [options.code ? `${options.code}: ${message}` : message];
-    if (options.status) parts.push(`(HTTP ${options.status})`);
-    if (options.requestId) parts.push(`[${options.requestId}]`);
-    super(parts.join(" "));
+    super(message);
     this.name = "PageSearchError";
     this.status = options.status;
     this.code = options.code;
@@ -272,11 +269,20 @@ async function parse<T>(response: Response): Promise<T> {
     data = undefined;
   }
   if (response.ok && data && typeof data === "object") return data as T;
-  const error = (data as { error?: { message?: string; code?: string; request_id?: string } } | undefined)?.error ?? {};
+  const requestId = response.headers.get("x-request-id") ?? undefined;
+  const doc = data as Partial<Document> | undefined;
+  if (doc?.object === "document" && doc.status === "failed") {
+    // An upload whose file could not be read answers with the document, failed, and why.
+    throw new PageSearchError(doc.error || `Document ${doc.id} could not be read.`, {
+      status: response.status, code: "document_failed", requestId,
+    });
+  }
+  const found = (data as { error?: unknown } | undefined)?.error;
+  const error = found && typeof found === "object" ? (found as { message?: string; code?: string; request_id?: string }) : {};
   throw new PageSearchError(error.message || text.slice(0, 200) || response.statusText, {
     status: response.status,
     code: error.code,
-    requestId: error.request_id ?? response.headers.get("x-request-id") ?? undefined,
+    requestId: error.request_id ?? requestId,
   });
 }
 
