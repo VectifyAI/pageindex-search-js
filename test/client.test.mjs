@@ -32,7 +32,7 @@ test("needs a key", () => {
 test("upload sends the file, then waits for the document", async () => {
   const { fetch, seen } = fake([202, { ...DOC, status: "processing", pages: null }], [200, DOC]);
   const client = new PageSearch({ apiKey: "pis_live_x", fetch });
-  const doc = await client.upload(new Uint8Array([37, 80, 68, 70]), { filename: "a.pdf" });
+  const doc = await client.documents.upload(new Uint8Array([37, 80, 68, 70]), { filename: "a.pdf" });
   assert.equal(doc.status, "ready");
   assert.equal(seen[0].method, "POST");
   assert.equal(seen[0].url, "https://api.search.pageindex.ai/v1/documents");
@@ -44,20 +44,20 @@ test("upload sends the file, then waits for the document", async () => {
 test("upload of a path reads the file", async () => {
   const { fetch, seen } = fake([200, DOC]);
   const client = new PageSearch({ apiKey: "pis_live_x", fetch });
-  await client.upload(new URL(import.meta.url).pathname);
+  await client.documents.upload(new URL(import.meta.url).pathname);
   assert.equal(seen[0].body.get("file").name, "client.test.mjs");
 });
 
 test("a failed document rejects", async () => {
   const { fetch } = fake([200, { ...DOC, status: "failed", error: "Not a readable PDF." }]);
   const client = new PageSearch({ apiKey: "pis_live_x", fetch });
-  await assert.rejects(client.upload(new Uint8Array([1])), { code: "document_failed", message: /Not a readable PDF/ });
+  await assert.rejects(client.documents.upload(new Uint8Array([1])), { code: "document_failed", message: /Not a readable PDF/ });
 });
 
 test("an upload that cannot be read rejects with the document's reason", async () => {
   const { fetch } = fake([422, { ...DOC, status: "failed", pages: null, error: "The PDF could not be read; it may be damaged." }]);
   const client = new PageSearch({ apiKey: "pis_live_x", fetch });
-  await assert.rejects(client.upload(new Uint8Array([1])), {
+  await assert.rejects(client.documents.upload(new Uint8Array([1])), {
     status: 422, code: "document_failed", requestId: "req_x", message: "The PDF could not be read; it may be damaged.",
   });
 });
@@ -82,14 +82,14 @@ test("a retried search sends the same idempotency key", async () => {
   assert.ok(keys[0] && keys[0] === keys[1]);
 });
 
-test("iterDocuments follows the pages", async () => {
+test("documents.list() goes through every page when looped over", async () => {
   const { fetch, seen } = fake(
     [200, { data: [DOC, { ...DOC, id: "doc_2" }], has_more: true }],
     [200, { data: [{ ...DOC, id: "doc_3" }], has_more: false }],
   );
   const client = new PageSearch({ apiKey: "pis_live_x", fetch });
   const ids = [];
-  for await (const doc of client.iterDocuments()) ids.push(doc.id);
+  for await (const doc of client.documents.list({ limit: 2 })) ids.push(doc.id);
   assert.deepEqual(ids, ["doc_1", "doc_2", "doc_3"]);
   assert.match(seen[1].url, /after=doc_2/);
 });
@@ -97,12 +97,12 @@ test("iterDocuments follows the pages", async () => {
 test("busy and unreachable are retried; other errors are not", async () => {
   const { fetch, seen } = fake([503, {}], [new TypeError("fetch failed"), null], [200, DOC]);
   const client = new PageSearch({ apiKey: "pis_live_x", fetch });
-  assert.equal((await client.document("doc_1")).id, "doc_1");
+  assert.equal((await client.documents.get("doc_1")).id, "doc_1");
   assert.equal(seen.length, 3);
 
   const missing = fake([404, { error: { code: "document_not_found", message: "No document doc_9.", request_id: "req_9" } }]);
   const other = new PageSearch({ apiKey: "pis_live_x", fetch: missing.fetch });
-  await assert.rejects(other.document("doc_9"), (error) => {
+  await assert.rejects(other.documents.get("doc_9"), (error) => {
     assert.ok(error instanceof PageSearchError);
     assert.equal(error.status, 404);
     assert.equal(error.code, "document_not_found");
@@ -110,6 +110,33 @@ test("busy and unreachable are retried; other errors are not", async () => {
     return true;
   });
   assert.equal(missing.seen.length, 1);
+});
+
+test("documents.list() awaited is one page", async () => {
+  const { fetch, seen } = fake([200, { data: [DOC], has_more: true }]);
+  const client = new PageSearch({ apiKey: "pis_live_x", fetch });
+  const page = await client.documents.list({ limit: 1 });
+  assert.deepEqual(page.data.map((d) => d.id), ["doc_1"]);
+  assert.equal(page.has_more, true);
+  assert.equal(seen.length, 1);
+  assert.match(seen[0].url, /limit=1/);
+});
+
+test("the names before 0.2 still work", async () => {
+  const { fetch } = fake([200, DOC], [200, { data: [DOC], has_more: false }]);
+  const client = new PageSearch({ apiKey: "pis_live_x", fetch });
+  const warn = console.warn;
+  const warned = [];
+  console.warn = (message) => warned.push(message);
+  try {
+    assert.equal((await client.document("doc_1")).id, "doc_1");
+    const ids = [];
+    for await (const doc of client.iterDocuments()) ids.push(doc.id);
+    assert.deepEqual(ids, ["doc_1"]);
+  } finally {
+    console.warn = warn;
+  }
+  assert.ok(warned.some((m) => m.includes("documents.get")) && warned.some((m) => m.includes("documents.list")));
 });
 
 test("works from require too", () => {

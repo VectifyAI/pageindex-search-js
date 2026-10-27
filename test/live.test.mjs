@@ -10,9 +10,9 @@ const skip = !(PDF && process.env.PAGEINDEX_SEARCH_API_KEY) && "needs a key and 
 
 test("upload, search and usage", { skip }, async () => {
   const client = new PageSearch();
-  const doc = await client.upload(PDF);
+  const doc = await client.documents.upload(PDF);
   assert.ok(doc.status === "ready" && doc.pages);
-  assert.equal((await client.upload(PDF)).id, doc.id); // the same file is the same document
+  assert.equal((await client.documents.upload(PDF)).id, doc.id); // the same file is the same document
 
   const result = await client.search(doc, ["What is this document about?", "Who wrote it?"], { topK: 3 });
   assert.deepEqual(result.results.map((a) => a.question), ["What is this document about?", "Who wrote it?"]);
@@ -22,14 +22,14 @@ test("upload, search and usage", { skip }, async () => {
   assert.deepEqual(pages, [...pages].sort((a, b) => b.relevance - a.relevance));
   assert.equal(result.usage.billable_pages + result.failed_pages.length, doc.pages);
 
-  assert.ok((await client.documents({ limit: 100 })).some((d) => d.id === doc.id));
+  assert.ok((await client.documents.list({ limit: 100 })).data.some((d) => d.id === doc.id));
   assert.ok("balance_usd" in (await client.usage()));
 });
 
 test("errors", { skip }, async () => {
   const client = new PageSearch();
-  await assert.rejects(client.document("doc_does_not_exist"), { status: 404, code: "document_not_found" });
-  await assert.rejects(new PageSearch({ apiKey: "pis_live_wrong" }).documents(), (error) => {
+  await assert.rejects(client.documents.get("doc_does_not_exist"), { status: 404, code: "document_not_found" });
+  await assert.rejects(async () => await new PageSearch({ apiKey: "pis_live_wrong" }).documents.list(), (error) => {
     assert.ok(error instanceof PageSearchError);
     assert.equal(error.status, 401);
     return true;
