@@ -14,13 +14,13 @@ test("upload, search and usage", { skip }, async () => {
   assert.ok(doc.status === "ready" && doc.pages);
   assert.equal((await client.documents.upload(PDF)).id, doc.id); // the same file is the same document
 
-  const result = await client.search(doc, ["What is this document about?", "Who wrote it?"], { topK: 3 });
+  const result = await client.search(["What is this document about?", "Who wrote it?"], { document: doc, topK: 3 });
   assert.deepEqual(result.results.map((a) => a.question), ["What is this document about?", "Who wrote it?"]);
-  assert.ok(result.results.every((a) => a.pages.length === 3));
-  const pages = result.results[0].pages;
+  assert.ok(result.results.every((a) => a.documents.length === 1 && a.documents[0].pages.length === 3));
+  const pages = result.results[0].documents[0].pages;
   assert.ok(pages.every((p) => p.page >= 1 && p.page <= doc.pages && p.relevance >= 0 && p.relevance <= 1));
   assert.deepEqual(pages, [...pages].sort((a, b) => b.relevance - a.relevance));
-  assert.equal(result.usage.billable_pages + result.failed_pages.length, doc.pages);
+  assert.equal(result.usage.pages, doc.pages);
 
   assert.ok((await client.documents.list({ limit: 100 })).data.some((d) => d.id === doc.id));
   assert.ok("balance_usd" in (await client.usage()));

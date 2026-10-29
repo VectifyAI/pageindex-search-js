@@ -62,21 +62,29 @@ test("an upload that cannot be read rejects with the document's reason", async (
   });
 });
 
-test("search sends the questions and top_k", async () => {
-  const result = { object: "search", id: "srch_1", document_id: "doc_1", results: [{ question: "q", pages: [{ page: 2, relevance: 0.9 }] }] };
-  const { fetch, seen } = fake([200, result]);
+test("search sends the questions and where to look", async () => {
+  const found = { document_id: "doc_1", filename: "a.pdf", page_count: 3, metadata: {}, relevance: null,
+    pages: [{ page: 2, relevance: 0.9 }], failed_pages: [] };
+  const result = { object: "search", id: "srch_1", results: [{ question: "q", documents: [found] }],
+    failed_documents: [], processing_documents: [] };
+  const { fetch, seen } = fake([200, result], [200, result]);
   const client = new PageSearch({ apiKey: "pis_live_x", fetch });
-  const out = await client.search(DOC, "q", { topK: 1 });
-  assert.equal(seen[0].url, "https://api.search.pageindex.ai/v1/documents/doc_1/search");
-  assert.deepEqual(JSON.parse(seen[0].body), { questions: ["q"], top_k: 1 });
-  assert.equal(out.results[0].pages[0].page, 2);
+  const out = await client.search("q", { document: DOC, topK: 1 });
+  assert.equal(seen[0].url, "https://api.search.pageindex.ai/v1/search");
+  assert.deepEqual(JSON.parse(seen[0].body), { questions: ["q"], document_id: "doc_1", top_k: 1 });
+  assert.equal(out.results[0].documents[0].pages[0].page, 2);
+  await client.search(["q1", "q2"], { collection: "col_1", filter: { year: 2026 }, maxDocuments: 2 });
+  assert.deepEqual(JSON.parse(seen[1].body),
+    { questions: ["q1", "q2"], collection_id: "col_1", filter: { year: 2026 }, max_documents: 2 });
+  // The call before 0.4 says how it reads now.
+  assert.throws(() => client.search(DOC, "q"), /\{ document \}/);
 });
 
 test("a retried search sends the same idempotency key", async () => {
-  const result = { object: "search", id: "srch_1", document_id: "doc_1", results: [] };
+  const result = { object: "search", id: "srch_1", results: [], failed_documents: [], processing_documents: [] };
   const { fetch, seen } = fake([503, {}], [200, result]);
   const client = new PageSearch({ apiKey: "pis_live_x", fetch });
-  await client.search("doc_1", "q");
+  await client.search("q", { document: "doc_1" });
   const keys = seen.map((r) => r.headers["Idempotency-Key"]);
   assert.equal(keys.length, 2);
   assert.ok(keys[0] && keys[0] === keys[1]);

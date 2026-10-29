@@ -1,6 +1,6 @@
-// The Page Search API client: upload a PDF, then search its pages with up to 10 questions at once.
+// The Page Search API client: upload PDFs, then search their pages with up to 10 questions at once.
 
-export const VERSION = "0.3.1";
+export const VERSION = "0.4.0";
 export const DEFAULT_BASE_URL = "https://api.search.pageindex.ai/v1";
 const API_KEY_ENV = "PAGEINDEX_SEARCH_API_KEY";
 // Retried, after a short wait that doubles: the server was busy or briefly unreachable.
@@ -44,18 +44,30 @@ export interface Page {
   relevance: number; // from 0 to 1: how likely the page helps answer the question
 }
 
+/** A document a search found pages in, with those pages. */
+export interface FoundDocument {
+  document_id: string;
+  filename: string | null;
+  page_count: number;
+  metadata: Metadata;
+  relevance: number | null; // how likely it holds the answer; null when the search named it (document)
+  pages: Page[]; // the pages that help answer the question, most relevant first
+  failed_pages: number[]; // pages that could not be read; not charged
+}
+
 export interface Answer {
   question: string;
-  pages: Page[]; // most relevant first
+  documents: FoundDocument[]; // most relevant first; one when the search named a document
 }
 
 export interface SearchResult {
   object: "search";
   id: string;
-  document_id: string;
   results: Answer[]; // one for each question, in the order asked
-  failed_pages: number[]; // pages that could not be read; not charged
-  usage: { pages: number; questions: number; billable_pages: number; cost_usd: number; balance_usd: number };
+  failed_documents: string[];
+  processing_documents: string[]; // still being made; not searched
+  // documents: judged to find which to open (none when the search named one); pages: searched in those opened.
+  usage: { documents: number; pages: number; questions: number; cost_usd: number; balance_usd: number };
   seconds: number;
 }
 
@@ -361,7 +373,7 @@ export class Collections {
  *
  *     const client = new PageSearch(); // reads PAGEINDEX_SEARCH_API_KEY
  *     const doc = await client.documents.upload("report.pdf");
- *     const result = await client.search(doc, ["What was revenue in 2024?"]);
+ *     const result = await client.search(["What was revenue in 2024?"], { document: doc });
  *     for (const answer of result.results) console.log(answer.question, answer.pages.map((p) => p.page));
  */
 export class PageSearch {
@@ -424,19 +436,35 @@ export class PageSearch {
   // Search
 
   /**
-   * Asks up to 10 questions about a document. For each, the pages that help answer it, most relevant first.
+   * Asks up to 10 questions. For each, the pages that help answer it, under the documents they are in.
    *
-   * Without topK, each answer lists the pages likely to help, possibly none. With it, exactly topK pages.
+   *     client.search(questions, { document })     // one document's pages
+   *     client.search(questions, { collection })   // across documents: these (documentIds), a collection's, those
+   *     client.search(questions)                   // whose metadata meets filter, or all of yours
    *
-   * Retries send the same idempotencyKey (a new one by default), so a search retried after a timeout is not run or
-   * charged twice; pass your own to make your own retries safe too.
+   * Across documents, the most relevant documents for each question are found first (at most maxDocuments, default 3)
+   * and only their pages searched. Without topK, each document lists the pages likely to help, possibly none; with it,
+   * exactly topK. Retries send the same idempotencyKey (a new one by default), so a search retried after a timeout is
+   * not run or charged twice; pass your own to make your own retries safe too.
    */
   search(
-    document: Document | string, questions: string | string[], options: { topK?: number; idempotencyKey?: string } = {},
+    questions: string | string[],
+    options: {
+      document?: Document | string; documentIds?: (Document | string)[]; collection?: Collection | string; filter?: Filter;
+      maxDocuments?: number; topK?: number; idempotencyKey?: string;
+    } = {},
   ): Promise<SearchResult> {
+    if (typeof options === "string" || Array.isArray(options) || (typeof questions === "object" && !Array.isArray(questions))) {
+      throw new TypeError("client.search(document, questions) is now client.search(questions, { document })");
+    }
     const body: Record<string, unknown> = { questions: typeof questions === "string" ? [questions] : questions };
+    if (options.document !== undefined) body.document_id = id(options.document);
+    if (options.documentIds !== undefined) body.document_ids = options.documentIds.map(id);
+    if (options.collection !== undefined) body.collection_id = id(options.collection);
+    if (options.filter !== undefined) body.filter = options.filter;
+    if (options.maxDocuments !== undefined) body.max_documents = options.maxDocuments;
     if (options.topK !== undefined) body.top_k = options.topK;
-    return this.request<SearchResult>("POST", `/documents/${encodeURIComponent(id(document))}/search`, {
+    return this.request<SearchResult>("POST", "/search", {
       json: body,
       headers: { "Idempotency-Key": options.idempotencyKey ?? newKey() },
     });

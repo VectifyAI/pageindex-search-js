@@ -23,14 +23,14 @@ import { PageSearch } from "@pageindex/search";
 const client = new PageSearch();
 
 const doc = await client.documents.upload("NVDA_2026_10K.pdf");
-const result = await client.search(doc, [
+const result = await client.search([
   "What was total revenue in fiscal 2026?",
   "How much stock did NVIDIA buy back?",
-]);
+], { document: doc });
 
 for (const answer of result.results) {
   console.log(answer.question);
-  for (const page of answer.pages) console.log(`  page ${page.page}: ${page.relevance}`);
+  for (const page of answer.documents[0].pages) console.log(`  page ${page.page}: ${page.relevance}`);
 }
 
 console.log(`cost $${result.usage.cost_usd}, credit left $${result.usage.balance_usd}`);
@@ -44,26 +44,27 @@ for await (const doc of client.documents.list()) {  // every document, newest fi
   console.log(doc.id, doc.filename, doc.pages);
 }
 
-await client.search("doc_60a07bcef3094b68806070f2", ["What was revenue in 2018?"]); // search one again by its id
+await client.search(["What was revenue in 2018?"], { document: "doc_60a07bcef3094b68806070f2" }); // search one again by its id
 await client.documents.delete("doc_60a07bcef3094b68806070f2");
 ```
 
-With many documents, first find the ones that answer a question, then search their pages:
+With many documents, search across them: the documents likely to answer are found first, then their pages.
 
 ```js
-const found = await client.documents.search("What was capital expenditure in 2018?"); // every document of yours
-for (const match of found.results[0].documents) {
-  console.log(match.filename, match.relevance);
-  await client.search(match.document_id, ["What was capital expenditure in 2018?"]);
+const result = await client.search("What was capital expenditure in 2018?"); // every document of yours
+for (const doc of result.results[0].documents) {
+  console.log(doc.filename, doc.pages.map((p) => [p.page, p.relevance]));
 }
 ```
+
+To find only which documents answer, use `client.documents.search`.
 
 Group documents into collections, and search within one:
 
 ```js
 const reports = await client.collections.create("Annual reports");
 await client.documents.upload("3M_2018_10K.pdf", { collection: reports }); // or later: client.collections.add(reports, [doc])
-const found = await client.documents.search("What was capital expenditure in 2018?", { collection: reports });
+const result = await client.search("What was capital expenditure in 2018?", { collection: reports });
 ```
 
 A document may be in many collections; deleting a collection leaves its documents.
@@ -74,7 +75,7 @@ Give documents your own metadata (strings, numbers and booleans) and filter by i
 const doc = await client.documents.upload("3M_2018_10K.pdf", { metadata: { ticker: "MMM", year: 2018 } });
 await client.documents.update(doc, { metadata: { audited: true } }); // null removes a key
 const recent = await client.documents.list({ filter: { year: { $gte: 2020 } } });
-const found = await client.documents.search("Who is the CEO?", { filter: { ticker: { $in: ["MMM", "AAPL"] } } });
+const result = await client.search("Who is the CEO?", { filter: { ticker: { $in: ["MMM", "AAPL"] } } });
 ```
 
 Filters take `$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`, `$in`, `$nin`, `$and` and `$or`.
@@ -85,7 +86,7 @@ Filters take `$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`, `$in`, `$nin`, `$and` a
 | --- | --- |
 | `new PageSearch({ apiKey, baseURL, timeout, maxRetries })` | The key defaults to `PAGEINDEX_SEARCH_API_KEY`; `timeout` is in milliseconds (default 120,000). |
 | `documents.upload(file, { filename, collection, metadata, wait })` | A path, or the file's bytes (`Uint8Array`, `ArrayBuffer`, `Blob`). Resolves to a `Document`, ready to search unless `wait: false`. |
-| `search(document, questions, { topK, idempotencyKey })` | Up to 10 questions. Each answer lists the pages likely to help (possibly none), or exactly `topK`. A search retried after a timeout is not charged twice. |
+| `search(questions, { document, documentIds, collection, filter, maxDocuments, topK, idempotencyKey })` | Up to 10 questions. For each, the pages that help, under the documents they are in: of one document, or across documents (those named, a collection's, those meeting `filter`, or all), whose most relevant (`maxDocuments`, default 3) are opened. Each document lists the pages likely to help, or exactly `topK`. A search retried after a timeout is not charged twice. |
 | `documents.search(questions, { documentIds, collection, filter, topK, idempotencyKey })` | Up to 10 questions of your documents (all of them, up to 1,000, those named, or a collection's). Each answer lists the documents likely to hold it, or exactly `topK`. Each document is priced as a page. |
 | `documents.list({ limit, after, collection, filter })` | Your documents, newest first, or a collection's, or those whose metadata meets `filter`. `for await` over it for every document; `await` it for one page (`data`, `has_more`). |
 | `documents.get(id)`, `documents.delete(document)` | One document; delete one. |
@@ -94,7 +95,8 @@ Filters take `$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`, `$in`, `$nin`, `$and` a
 | `collections.add(collection, documents)`, `.remove(collection, document)` | Put documents in a collection, or take one out. `documents.upload(file, { collection })` puts a new one in. |
 | `usage({ start, end })` | Uploads, searches and cost by day, your credit and stored pages. |
 
-Before 0.2 these were `upload()`, `document()`, `documents()`, `iterDocuments()` and `delete()` on the client;
+In 0.4, `search(document, questions)` became `search(questions, { document })`, and each answer lists
+documents, each with its pages. Before 0.2 these were `upload()`, `document()`, `documents()`, `iterDocuments()` and `delete()` on the client;
 all but `documents()` still work, with a warning, for now.
 
 Errors reject with `PageSearchError`, with the API's `status`, `code`, `message` and `requestId`.
