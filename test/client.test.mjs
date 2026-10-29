@@ -217,3 +217,17 @@ test("works from require too", () => {
   const { PageSearch: Required } = createRequire(import.meta.url)("../dist/cjs/index.js");
   assert.equal(typeof Required, "function");
 });
+
+test("schema: of a collection, or of documents meeting a filter", async () => {
+  const schema = { object: "schema", collection_id: "col_1", documents: 3, keys: [
+    { key: "year", types: ["number", "string"], documents: 3, min: 2025, max: 2026, values: [{ value: "2024", documents: 1 }] }] };
+  const { fetch, seen } = fake([200, schema], [200, schema]);
+  const client = new PageSearch({ apiKey: "pis_live_x", fetch });
+  const s = await client.collections.schema("col_1");
+  assert.equal(seen[0].url, "https://api.search.pageindex.ai/v1/collections/col_1/schema");
+  assert.deepEqual(s.keys[0].types, ["number", "string"]);
+  await client.documents.schema({ filter: { ticker: "NVDA" } });
+  const url = new URL(seen[1].url);
+  assert.equal(url.pathname, "/v1/documents/schema");
+  assert.deepEqual(JSON.parse(url.searchParams.get("filter")), { ticker: "NVDA" });
+});

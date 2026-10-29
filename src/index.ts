@@ -1,6 +1,6 @@
 // The Page Search API client: upload PDFs, then search their pages with up to 10 questions at once.
 
-export const VERSION = "0.4.1";
+export const VERSION = "0.4.2";
 export const DEFAULT_BASE_URL = "https://api.search.pageindex.ai/v1";
 const API_KEY_ENV = "PAGEINDEX_SEARCH_API_KEY";
 // Retried, after a short wait that doubles: the server was busy or briefly unreachable.
@@ -93,6 +93,27 @@ export interface DocumentSearchResult {
   // Each document is priced as a page.
   usage: { documents: number; questions: number; billable_documents: number; cost_usd: number; balance_usd: number };
   seconds: number;
+}
+
+/** One metadata key: the types of its values (more than one when documents disagree) and how many documents have it. */
+export interface SchemaKey {
+  key: string;
+  types: ("string" | "number" | "boolean")[];
+  documents: number;
+  /** For numbers: the least and greatest. */
+  min?: number;
+  max?: number;
+  /** For strings: the commonest values, with how many documents have each. */
+  values?: { value: string; documents: number }[];
+}
+
+/** What your documents' metadata holds, counted from them as they are now: nothing is declared or enforced. */
+export interface Schema {
+  object: "schema";
+  collection_id: string | null;
+  documents: number;
+  /** Most documents first. */
+  keys: SchemaKey[];
 }
 
 export interface UsageDay {
@@ -287,6 +308,16 @@ export class Documents {
     );
   }
 
+  /**
+   * The metadata keys of your documents, or of those in a collection, or meeting filter: each key's types, how many
+   * documents have it, its least and greatest numbers, and its commonest strings.
+   */
+  schema(options: { collection?: Collection | string; filter?: Filter } = {}): Promise<Schema> {
+    const collection_id = options.collection === undefined ? undefined : id(options.collection);
+    const filter = options.filter === undefined ? undefined : JSON.stringify(options.filter);
+    return this.request<Schema>("GET", "/documents/schema", { query: { collection_id, filter } });
+  }
+
   /** Deletes a document and its pages; searches of it then fail. */
   async delete(document: Document | string): Promise<void> {
     await this.request("DELETE", `/documents/${encodeURIComponent(id(document))}`);
@@ -347,6 +378,11 @@ export class Collections {
 
   rename(collection: Collection | string, name: string): Promise<Collection> {
     return this.request<Collection>("PATCH", `/collections/${encodeURIComponent(id(collection))}`, { json: { name } });
+  }
+
+  /** The metadata keys of the collection's documents: see documents.schema. */
+  schema(collection: Collection | string): Promise<Schema> {
+    return this.request<Schema>("GET", `/collections/${encodeURIComponent(id(collection))}/schema`);
   }
 
   /** Deletes the collection; its documents stay. */
