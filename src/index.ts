@@ -1,6 +1,6 @@
 // The Page Search API client: upload a PDF, then search its pages with up to 10 questions at once.
 
-export const VERSION = "0.3.0";
+export const VERSION = "0.3.1";
 export const DEFAULT_BASE_URL = "https://api.search.pageindex.ai/v1";
 const API_KEY_ENV = "PAGEINDEX_SEARCH_API_KEY";
 // Retried, after a short wait that doubles: the server was busy or briefly unreachable.
