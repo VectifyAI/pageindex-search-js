@@ -67,7 +67,7 @@ test("search sends the questions and where to look", async () => {
     pages: [{ page: 2, relevance: 0.9 }], failed_pages: [] };
   const result = { object: "search", id: "srch_1", results: [{ question: "q", documents: [found] }],
     failed_documents: [], processing_documents: [] };
-  const { fetch, seen } = fake([200, result], [200, result]);
+  const { fetch, seen } = fake([200, result], [200, result], [200, result]);
   const client = new PageSearch({ apiKey: "pis_live_x", fetch });
   const out = await client.search("q", { document: DOC, topK: 1 });
   assert.equal(seen[0].url, "https://api.search.pageindex.ai/v1/search");
@@ -76,6 +76,8 @@ test("search sends the questions and where to look", async () => {
   await client.search(["q1", "q2"], { collection: "col_1", filter: { year: 2026 }, maxDocuments: 2 });
   assert.deepEqual(JSON.parse(seen[1].body),
     { questions: ["q1", "q2"], collection_id: "col_1", filter: { year: 2026 }, max_documents: 2 });
+  await client.search("q", { documentTopK: 3 });
+  assert.deepEqual(JSON.parse(seen[2].body), { questions: ["q"], document_top_k: 3 });
   // The call before 0.4 says how it reads now.
   assert.throws(() => client.search(DOC, "q"), /\{ document \}/);
 });

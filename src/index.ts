@@ -1,6 +1,6 @@
 // The Page Search API client: upload PDFs, then search their pages with up to 10 questions at once.
 
-export const VERSION = "0.4.0";
+export const VERSION = "0.4.1";
 export const DEFAULT_BASE_URL = "https://api.search.pageindex.ai/v1";
 const API_KEY_ENV = "PAGEINDEX_SEARCH_API_KEY";
 // Retried, after a short wait that doubles: the server was busy or briefly unreachable.
@@ -442,8 +442,8 @@ export class PageSearch {
    *     client.search(questions, { collection })   // across documents: these (documentIds), a collection's, those
    *     client.search(questions)                   // whose metadata meets filter, or all of yours
    *
-   * Across documents, the most relevant documents for each question are found first (at most maxDocuments, default 3)
-   * and only their pages searched. Without topK, each document lists the pages likely to help, possibly none; with it,
+   * Across documents, the most relevant documents for each question are found first and only their pages searched:
+   * those likely to answer, at most maxDocuments (default 3), or exactly documentTopK. Without topK, each document lists the pages likely to help, possibly none; with it,
    * exactly topK. Retries send the same idempotencyKey (a new one by default), so a search retried after a timeout is
    * not run or charged twice; pass your own to make your own retries safe too.
    */
@@ -451,7 +451,7 @@ export class PageSearch {
     questions: string | string[],
     options: {
       document?: Document | string; documentIds?: (Document | string)[]; collection?: Collection | string; filter?: Filter;
-      maxDocuments?: number; topK?: number; idempotencyKey?: string;
+      maxDocuments?: number; documentTopK?: number; topK?: number; idempotencyKey?: string;
     } = {},
   ): Promise<SearchResult> {
     if (typeof options === "string" || Array.isArray(options) || (typeof questions === "object" && !Array.isArray(questions))) {
@@ -463,6 +463,7 @@ export class PageSearch {
     if (options.collection !== undefined) body.collection_id = id(options.collection);
     if (options.filter !== undefined) body.filter = options.filter;
     if (options.maxDocuments !== undefined) body.max_documents = options.maxDocuments;
+    if (options.documentTopK !== undefined) body.document_top_k = options.documentTopK;
     if (options.topK !== undefined) body.top_k = options.topK;
     return this.request<SearchResult>("POST", "/search", {
       json: body,
