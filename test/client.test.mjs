@@ -139,6 +139,70 @@ test("the names before 0.2 still work", async () => {
   assert.ok(warned.some((m) => m.includes("documents.get")) && warned.some((m) => m.includes("documents.list")));
 });
 
+test("documents.search() sends the questions, the documents named and a key", async () => {
+  const found = {
+    object: "document_search", id: "srch_1",
+    results: [{ question: "Who is the CEO?", documents: [{ document_id: "doc_2", filename: "b.pdf", pages: 40, relevance: 0.9 }] }],
+    failed_documents: [], processing_documents: [],
+    usage: { documents: 2, questions: 1, billable_documents: 2, cost_usd: 0.001, balance_usd: 4.999 }, seconds: 0.8,
+  };
+  const { fetch, seen } = fake([200, found]);
+  const client = new PageSearch({ apiKey: "pis_live_x", fetch });
+  const result = await client.documents.search("Who is the CEO?", { documentIds: [DOC, "doc_2"], topK: 1 });
+  assert.match(seen[0].url, /\/v1\/documents\/search$/);
+  assert.deepEqual(JSON.parse(seen[0].body), { questions: ["Who is the CEO?"], document_ids: ["doc_1", "doc_2"], top_k: 1 });
+  assert.ok(seen[0].headers["Idempotency-Key"]);
+  assert.equal(result.results[0].documents[0].document_id, "doc_2");
+});
+
+test("collections: create, add, remove, and upload, list and search within one", async () => {
+  const col = { object: "collection", id: "col_1", name: "Reports", documents: 2, created_at: "2026-10-29T00:00:00Z" };
+  const found = { object: "document_search", id: "srch_1", results: [], failed_documents: [], processing_documents: [],
+    usage: { documents: 0, questions: 1, billable_documents: 0, cost_usd: 0, balance_usd: 5 }, seconds: 0.1 };
+  const { fetch, seen } = fake([200, col], [200, col], [200, col], [200, DOC], [200, { data: [DOC], has_more: false }],
+    [200, found], [200, { data: [col], has_more: false }]);
+  const client = new PageSearch({ apiKey: "pis_live_x", fetch });
+  const made = await client.collections.create("Reports");
+  assert.equal(made.id, "col_1");
+  await client.collections.add(made, [DOC, "doc_2"]);
+  await client.collections.remove(made, "doc_2");
+  await client.documents.upload(new Uint8Array([37, 80, 68, 70]), { collection: made, wait: false });
+  const ids = [];
+  for await (const doc of client.documents.list({ collection: "col_1" })) ids.push(doc.id);
+  await client.documents.search("q", { collection: made });
+  const names = [];
+  for await (const c of client.collections.list()) names.push(c.name);
+
+  assert.deepEqual(JSON.parse(seen[0].body), { name: "Reports" });
+  assert.match(seen[1].url, /\/collections\/col_1\/documents$/);
+  assert.deepEqual(JSON.parse(seen[1].body), { document_ids: ["doc_1", "doc_2"] });
+  assert.equal(seen[2].method, "DELETE");
+  assert.match(seen[2].url, /\/collections\/col_1\/documents\/doc_2$/);
+  assert.equal(seen[3].body.get("collection_id"), "col_1");
+  assert.match(seen[4].url, /collection_id=col_1/);
+  assert.deepEqual(ids, ["doc_1"]);
+  assert.equal(JSON.parse(seen[5].body).collection_id, "col_1");
+  assert.deepEqual(names, ["Reports"]);
+});
+
+test("metadata: set on upload and update; filter on list and search", async () => {
+  const doc = { ...DOC, metadata: { year: 2018 } };
+  const found = { object: "document_search", id: "s", results: [], failed_documents: [], processing_documents: [],
+    usage: { documents: 0, questions: 1, billable_documents: 0, cost_usd: 0, balance_usd: 5 }, seconds: 0.1 };
+  const { fetch, seen } = fake([200, doc], [200, doc], [200, { data: [doc], has_more: false }], [200, found]);
+  const client = new PageSearch({ apiKey: "pis_live_x", fetch });
+  await client.documents.upload(new Uint8Array([37, 80, 68, 70]), { metadata: { year: 2018 }, wait: false });
+  await client.documents.update("doc_1", { metadata: { note: null } });
+  const page = await client.documents.list({ filter: { year: { $gte: 2015 } } });
+  await client.documents.search("q", { filter: { ticker: "MMM" } });
+  assert.equal(seen[0].body.get("metadata"), '{"year":2018}');
+  assert.equal(seen[1].method, "PATCH");
+  assert.deepEqual(JSON.parse(seen[1].body), { metadata: { note: null } });
+  assert.deepEqual(JSON.parse(new URL(seen[2].url).searchParams.get("filter")), { year: { $gte: 2015 } });
+  assert.deepEqual(page.data[0].metadata, { year: 2018 });
+  assert.deepEqual(JSON.parse(seen[3].body).filter, { ticker: "MMM" });
+});
+
 test("works from require too", () => {
   const { PageSearch: Required } = createRequire(import.meta.url)("../dist/cjs/index.js");
   assert.equal(typeof Required, "function");

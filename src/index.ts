@@ -1,6 +1,6 @@
 // The Page Search API client: upload a PDF, then search its pages with up to 10 questions at once.
 
-export const VERSION = "0.2.0";
+export const VERSION = "0.3.0";
 export const DEFAULT_BASE_URL = "https://api.search.pageindex.ai/v1";
 const API_KEY_ENV = "PAGEINDEX_SEARCH_API_KEY";
 // Retried, after a short wait that doubles: the server was busy or briefly unreachable.
@@ -19,6 +19,24 @@ export interface Document {
   created_at: string;
   error?: string; // when failed
   duplicate?: boolean; // on uploads: the same file was already uploaded; this is that document
+  metadata: Metadata; // your own keys
+}
+
+/** A document's own keys: strings, numbers and booleans, at most 16. */
+export type Metadata = Record<string, string | number | boolean>;
+
+/**
+ * Picks documents by their metadata: {"ticker": "MMM"}, {"year": {"$gte": 2020}}, {"$or": [...]}. Conditions are $eq,
+ * $ne, $gt, $gte, $lt, $lte, $in and $nin; $and and $or combine filters.
+ */
+export type Filter = Record<string, unknown>;
+
+export interface Collection {
+  object: "collection";
+  id: string;
+  name: string;
+  documents: number; // how many documents it holds
+  created_at: string;
 }
 
 export interface Page {
@@ -38,6 +56,29 @@ export interface SearchResult {
   results: Answer[]; // one for each question, in the order asked
   failed_pages: number[]; // pages that could not be read; not charged
   usage: { pages: number; questions: number; billable_pages: number; cost_usd: number; balance_usd: number };
+  seconds: number;
+}
+
+export interface DocumentMatch {
+  document_id: string;
+  filename: string | null;
+  pages: number;
+  relevance: number; // from 0 to 1: how likely the document holds what answers the question
+}
+
+export interface DocumentAnswer {
+  question: string;
+  documents: DocumentMatch[]; // most relevant first
+}
+
+export interface DocumentSearchResult {
+  object: "document_search";
+  id: string;
+  results: DocumentAnswer[]; // one for each question, in the order asked
+  failed_documents: string[]; // could not be judged just now; not charged
+  processing_documents: string[]; // still being made; not searched
+  // Each document is priced as a page.
+  usage: { documents: number; questions: number; billable_documents: number; cost_usd: number; balance_usd: number };
   seconds: number;
 }
 
@@ -89,63 +130,87 @@ export class PageSearchError extends Error {
 }
 
 type Request = <T>(
-  method: string, path: string, options?: { query?: Record<string, string | number | undefined>; body?: FormData },
+  method: string,
+  path: string,
+  options?: {
+    query?: Record<string, string | number | undefined>;
+    body?: FormData;
+    json?: unknown;
+    headers?: Record<string, string>;
+  },
 ) => Promise<T>;
 
-/** One page of your documents, newest first. */
-export interface DocumentPage {
-  data: Document[];
+/** One page of a list, newest first. */
+export interface ListPage<T> {
+  data: T[];
   has_more: boolean;
   /** The page after this one, or null at the end. */
-  nextPage(): Promise<DocumentPage | null>;
+  nextPage(): Promise<ListPage<T> | null>;
 }
 
-/**
- * What documents.list() returns: await it for one page, or loop over it with for await to see every document, the
- * pages after the first fetched as they are needed.
- */
-export class DocumentList implements PromiseLike<DocumentPage>, AsyncIterable<Document> {
-  private first?: Promise<DocumentPage>;
+/** One page of your documents, newest first. */
+export type DocumentPage = ListPage<Document>;
+/** One page of your collections, newest first. */
+export type CollectionPage = ListPage<Collection>;
 
-  constructor(private readonly load: (after?: string) => Promise<{ data: Document[]; has_more: boolean }>,
+/**
+ * What a list() returns: await it for one page, or loop over it with for await to see every item, the pages after
+ * the first fetched as they are needed.
+ */
+export class Paged<T extends { id: string }> implements PromiseLike<ListPage<T>>, AsyncIterable<T> {
+  private first?: Promise<ListPage<T>>;
+
+  constructor(private readonly load: (after?: string) => Promise<{ data: T[]; has_more: boolean }>,
               private readonly after?: string) {}
 
-  then<A = DocumentPage, B = never>(
-    resolved?: ((page: DocumentPage) => A | PromiseLike<A>) | null, rejected?: ((reason: unknown) => B | PromiseLike<B>) | null,
+  then<A = ListPage<T>, B = never>(
+    resolved?: ((page: ListPage<T>) => A | PromiseLike<A>) | null, rejected?: ((reason: unknown) => B | PromiseLike<B>) | null,
   ): Promise<A | B> {
     return (this.first ??= this.page(this.after)).then(resolved, rejected);
   }
 
-  catch<B = never>(rejected?: ((reason: unknown) => B | PromiseLike<B>) | null): Promise<DocumentPage | B> {
+  catch<B = never>(rejected?: ((reason: unknown) => B | PromiseLike<B>) | null): Promise<ListPage<T> | B> {
     return this.then(undefined, rejected);
   }
 
-  finally(done?: (() => void) | null): Promise<DocumentPage> {
+  finally(done?: (() => void) | null): Promise<ListPage<T>> {
     return this.then().finally(done);
   }
 
-  async *[Symbol.asyncIterator](): AsyncGenerator<Document> {
-    for (let page: DocumentPage | null = await this; page; page = await page.nextPage()) yield* page.data;
+  async *[Symbol.asyncIterator](): AsyncGenerator<T> {
+    for (let page: ListPage<T> | null = await this; page; page = await page.nextPage()) yield* page.data;
   }
 
-  private async page(after?: string): Promise<DocumentPage> {
+  private async page(after?: string): Promise<ListPage<T>> {
     const { data, has_more } = await this.load(after);
     const last = data[data.length - 1];
     return { data, has_more, nextPage: () => (has_more && last ? this.page(last.id) : Promise.resolve(null)) };
   }
 }
 
-/** Your documents: client.documents.upload(file), .get(id), .list(), .delete(document). */
+/** What documents.list() returns; see Paged. */
+export class DocumentList extends Paged<Document> {}
+/** What collections.list() returns; see Paged. */
+export class CollectionList extends Paged<Collection> {}
+
+/**
+ * Your documents: client.documents.upload(file), .get(id), .list(), .delete(document), and .search(questions) to
+ * find which of them answer a question.
+ */
 export class Documents {
   constructor(private readonly request: Request) {}
 
   /**
-   * Uploads a PDF: a path (in Node) or its bytes. Uploading the same file again returns its document.
+   * Uploads a PDF: a path (in Node) or its bytes. Uploading the same file again returns its document. With
+   * collection, the document is put in that collection too; metadata is set on it, as update() does.
    *
    * With wait (the default), resolves once the document is ready to search, or rejects if it failed; most are
    * ready in a second or two. Without it, resolves at once; the document may still be processing.
    */
-  async upload(file: FileInput, options: { filename?: string; wait?: boolean; timeout?: number } = {}): Promise<Document> {
+  async upload(
+    file: FileInput,
+    options: { filename?: string; collection?: Collection | string; metadata?: Metadata; wait?: boolean; timeout?: number } = {},
+  ): Promise<Document> {
     let blob: Blob;
     let filename = options.filename;
     if (typeof file === "string") {
@@ -161,6 +226,8 @@ export class Documents {
     }
     const form = new FormData();
     form.append("file", blob, filename || "document.pdf");
+    if (options.collection !== undefined) form.append("collection_id", id(options.collection));
+    if (options.metadata !== undefined) form.append("metadata", JSON.stringify(options.metadata));
     const doc = await this.request<Document>("POST", "/documents", { body: form });
     return options.wait === false ? doc : this.wait(doc, { timeout: options.timeout });
   }
@@ -184,16 +251,25 @@ export class Documents {
     return this.request<Document>("GET", `/documents/${encodeURIComponent(documentId)}`);
   }
 
+  /** Sets metadata keys; a key set to null is removed, and keys not named stay. */
+  update(document: Document | string, changes: { metadata: Record<string, string | number | boolean | null> }): Promise<Document> {
+    return this.request<Document>("PATCH", `/documents/${encodeURIComponent(id(document))}`, { json: changes });
+  }
+
   /**
-   * Your documents, newest first, limit (1 to 100) a page; after: the last id of the page before.
+   * Your documents, newest first, or those in a collection, or whose metadata meets filter; limit (1 to 100) a page;
+   * after: the last id of the page before.
    *
    *     for await (const doc of client.documents.list()) ...   // every document, a page at a time
    *     const page = await client.documents.list({ limit: 10 }); // one page: page.data, page.has_more
    */
-  list(options: { limit?: number; after?: string } = {}): DocumentList {
+  list(options: { limit?: number; after?: string; collection?: Collection | string; filter?: Filter } = {}): DocumentList {
     const limit = options.limit ?? 20;
+    const collection_id = options.collection === undefined ? undefined : id(options.collection);
+    const filter = options.filter === undefined ? undefined : JSON.stringify(options.filter);
     return new DocumentList(
-      (after) => this.request<{ data: Document[]; has_more: boolean }>("GET", "/documents", { query: { limit, after } }),
+      (after) => this.request<{ data: Document[]; has_more: boolean }>(
+        "GET", "/documents", { query: { limit, after, collection_id, filter } }),
       options.after,
     );
   }
@@ -201,6 +277,81 @@ export class Documents {
   /** Deletes a document and its pages; searches of it then fail. */
   async delete(document: Document | string): Promise<void> {
     await this.request("DELETE", `/documents/${encodeURIComponent(id(document))}`);
+  }
+
+  /**
+   * Asks up to 10 questions of your documents. For each, the documents likely to hold the answer, most relevant
+   * first; then search those documents' pages with client.search().
+   *
+   * Every document of yours (up to 1,000), only those in documentIds, or only those in a collection and those whose
+   * metadata meets filter. Without topK, each answer lists the
+   * documents likely to help, possibly none; with it, exactly topK. Each document is priced as a page. Retries
+   * send the same idempotencyKey, as client.search() does.
+   */
+  search(
+    questions: string | string[],
+    options: {
+      documentIds?: (Document | string)[]; collection?: Collection | string; filter?: Filter; topK?: number;
+      idempotencyKey?: string;
+    } = {},
+  ): Promise<DocumentSearchResult> {
+    const body: Record<string, unknown> = { questions: typeof questions === "string" ? [questions] : questions };
+    if (options.documentIds !== undefined) body.document_ids = options.documentIds.map(id);
+    if (options.collection !== undefined) body.collection_id = id(options.collection);
+    if (options.filter !== undefined) body.filter = options.filter;
+    if (options.topK !== undefined) body.top_k = options.topK;
+    return this.request<DocumentSearchResult>("POST", "/documents/search", {
+      json: body,
+      headers: { "Idempotency-Key": options.idempotencyKey ?? newKey() },
+    });
+  }
+}
+
+/**
+ * Named groups of your documents, to search within: client.collections.create(name), .list(), .get(id),
+ * .rename(collection, name), .delete(collection), .add(collection, documents), .remove(collection, document). A document
+ * may be in many collections; deleting a collection leaves its documents.
+ */
+export class Collections {
+  constructor(private readonly request: Request) {}
+
+  create(name: string): Promise<Collection> {
+    return this.request<Collection>("POST", "/collections", { json: { name } });
+  }
+
+  /** Your collections, newest first, limit (1 to 100) a page. for await over it for every collection. */
+  list(options: { limit?: number; after?: string } = {}): CollectionList {
+    const limit = options.limit ?? 20;
+    return new CollectionList(
+      (after) => this.request<{ data: Collection[]; has_more: boolean }>("GET", "/collections", { query: { limit, after } }),
+      options.after,
+    );
+  }
+
+  get(collectionId: string): Promise<Collection> {
+    return this.request<Collection>("GET", `/collections/${encodeURIComponent(collectionId)}`);
+  }
+
+  rename(collection: Collection | string, name: string): Promise<Collection> {
+    return this.request<Collection>("PATCH", `/collections/${encodeURIComponent(id(collection))}`, { json: { name } });
+  }
+
+  /** Deletes the collection; its documents stay. */
+  async delete(collection: Collection | string): Promise<void> {
+    await this.request("DELETE", `/collections/${encodeURIComponent(id(collection))}`);
+  }
+
+  /** Puts documents in the collection (up to 1,000 at once); those already in it stay. */
+  add(collection: Collection | string, documents: (Document | string)[]): Promise<Collection> {
+    return this.request<Collection>("POST", `/collections/${encodeURIComponent(id(collection))}/documents`, {
+      json: { document_ids: documents.map(id) },
+    });
+  }
+
+  /** Takes a document out of the collection; the document stays. */
+  remove(collection: Collection | string, document: Document | string): Promise<Collection> {
+    return this.request<Collection>(
+      "DELETE", `/collections/${encodeURIComponent(id(collection))}/documents/${encodeURIComponent(id(document))}`);
   }
 }
 
@@ -216,6 +367,7 @@ export class PageSearch {
   readonly baseURL: string;
   readonly maxRetries: number;
   readonly documents: Documents;
+  readonly collections: Collections;
   private readonly apiKey: string;
   private readonly timeout: number;
   private readonly fetch: typeof fetch;
@@ -233,6 +385,7 @@ export class PageSearch {
     this.maxRetries = options.maxRetries ?? 2;
     this.fetch = options.fetch ?? globalThis.fetch.bind(globalThis);
     this.documents = new Documents((method, path, opts) => this.request(method, path, opts));
+    this.collections = new Collections((method, path, opts) => this.request(method, path, opts));
   }
 
   // The names before 0.2, kept for a while.
@@ -339,8 +492,8 @@ export class PageSearch {
   }
 }
 
-function id(document: Document | string): string {
-  return typeof document === "string" ? document : document.id;
+function id(item: Document | Collection | string): string {
+  return typeof item === "string" ? item : item.id;
 }
 
 /** A random idempotency key; Node 18 has no global crypto. */

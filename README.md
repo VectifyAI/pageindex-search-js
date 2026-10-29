@@ -48,15 +48,50 @@ await client.search("doc_60a07bcef3094b68806070f2", ["What was revenue in 2018?"
 await client.documents.delete("doc_60a07bcef3094b68806070f2");
 ```
 
+With many documents, first find the ones that answer a question, then search their pages:
+
+```js
+const found = await client.documents.search("What was capital expenditure in 2018?"); // every document of yours
+for (const match of found.results[0].documents) {
+  console.log(match.filename, match.relevance);
+  await client.search(match.document_id, ["What was capital expenditure in 2018?"]);
+}
+```
+
+Group documents into collections, and search within one:
+
+```js
+const reports = await client.collections.create("Annual reports");
+await client.documents.upload("3M_2018_10K.pdf", { collection: reports }); // or later: client.collections.add(reports, [doc])
+const found = await client.documents.search("What was capital expenditure in 2018?", { collection: reports });
+```
+
+A document may be in many collections; deleting a collection leaves its documents.
+
+Give documents your own metadata (strings, numbers and booleans) and filter by it:
+
+```js
+const doc = await client.documents.upload("3M_2018_10K.pdf", { metadata: { ticker: "MMM", year: 2018 } });
+await client.documents.update(doc, { metadata: { audited: true } }); // null removes a key
+const recent = await client.documents.list({ filter: { year: { $gte: 2020 } } });
+const found = await client.documents.search("Who is the CEO?", { filter: { ticker: { $in: ["MMM", "AAPL"] } } });
+```
+
+Filters take `$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`, `$in`, `$nin`, `$and` and `$or`.
+
 ## Reference
 
 | | |
 | --- | --- |
 | `new PageSearch({ apiKey, baseURL, timeout, maxRetries })` | The key defaults to `PAGEINDEX_SEARCH_API_KEY`; `timeout` is in milliseconds (default 120,000). |
-| `documents.upload(file, { filename, wait })` | A path, or the file's bytes (`Uint8Array`, `ArrayBuffer`, `Blob`). Resolves to a `Document`, ready to search unless `wait: false`. |
+| `documents.upload(file, { filename, collection, metadata, wait })` | A path, or the file's bytes (`Uint8Array`, `ArrayBuffer`, `Blob`). Resolves to a `Document`, ready to search unless `wait: false`. |
 | `search(document, questions, { topK, idempotencyKey })` | Up to 10 questions. Each answer lists the pages likely to help (possibly none), or exactly `topK`. A search retried after a timeout is not charged twice. |
-| `documents.list({ limit, after })` | Your documents, newest first. `for await` over it for every document; `await` it for one page (`data`, `has_more`). |
+| `documents.search(questions, { documentIds, collection, filter, topK, idempotencyKey })` | Up to 10 questions of your documents (all of them, up to 1,000, those named, or a collection's). Each answer lists the documents likely to hold it, or exactly `topK`. Each document is priced as a page. |
+| `documents.list({ limit, after, collection, filter })` | Your documents, newest first, or a collection's, or those whose metadata meets `filter`. `for await` over it for every document; `await` it for one page (`data`, `has_more`). |
 | `documents.get(id)`, `documents.delete(document)` | One document; delete one. |
+| `documents.update(document, { metadata })` | Set metadata keys; `null` removes one. |
+| `collections.create(name)`, `.list()`, `.get(id)`, `.rename(collection, name)`, `.delete(collection)` | Named groups of your documents. Deleting one leaves its documents. |
+| `collections.add(collection, documents)`, `.remove(collection, document)` | Put documents in a collection, or take one out. `documents.upload(file, { collection })` puts a new one in. |
 | `usage({ start, end })` | Uploads, searches and cost by day, your credit and stored pages. |
 
 Before 0.2 these were `upload()`, `document()`, `documents()`, `iterDocuments()` and `delete()` on the client;
