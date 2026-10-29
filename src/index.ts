@@ -63,6 +63,7 @@ export interface DocumentMatch {
   document_id: string;
   filename: string | null;
   pages: number;
+  metadata: Metadata;
   relevance: number; // from 0 to 1: how likely the document holds what answers the question
 }
 
