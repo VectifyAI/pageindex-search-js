@@ -1,0 +1,275 @@
+/**
+ * Tools an LLM agent can call: find which documents answer, search the pages of the ones it picks (with their
+ * text), and read pages, with pictures of those best seen.
+ *
+ *     const tools = await client.tools({ collection: filings });
+ *     const response = await anthropic.messages.create({ ..., tools: tools.definitions });
+ *     for (const block of response.content) {
+ *       if (block.type === "tool_use") content = (await tools.run(block.name, block.input)).anthropic();
+ *     }
+ */
+import type { Collection, Filter, PageSearch, PageText, Schema } from "./index.js";
+
+const MAX_PAGE_DOCUMENTS = 10; // documents one search_pages call may open
+const MAX_PAGES_READ = 20; // pages one read_pages call may read
+const MAX_IMAGES = 5; // pictures one read_pages call may give: each is some thousands of tokens
+
+const FILTERS = 'Conditions: {"key": value} equals; {"key": {"$ne"|"$in"|"$nin"|"$gt"|"$gte"|"$lt"|"$lte": ...}}; ' +
+  '{"$and": [...]} and {"$or": [...]} combine filters. Values match exactly, type included: "2018" is not 2018.';
+
+/** A tool as Anthropic's API takes it; tools.openai has the same in OpenAI's function format. */
+export interface ToolDefinition {
+  name: string;
+  description: string;
+  input_schema: Record<string, unknown>;
+}
+
+/** A page as PNG bytes. */
+export class PageImage {
+  constructor(readonly documentId: string, readonly page: number, readonly png: Uint8Array) {}
+
+  get base64(): string {
+    return toBase64(this.png);
+  }
+
+  /** For OpenAI: data:image/png;base64,... */
+  get dataUrl(): string {
+    return "data:image/png;base64," + this.base64;
+  }
+}
+
+/** What a tool gives back: JSON text, and from read_pages and view_pages, pictures of pages. */
+export class ToolResult {
+  constructor(readonly text: string, readonly images: PageImage[] = []) {}
+
+  /** The tool_result content for Claude: the text, then each picture after its page number. */
+  anthropic(): string | Record<string, unknown>[] {
+    if (!this.images.length) return this.text;
+    const content: Record<string, unknown>[] = [{ type: "text", text: this.text }];
+    for (const image of this.images) {
+      content.push({ type: "text", text: `Page ${image.page} of ${image.documentId}:` });
+      content.push({ type: "image", source: { type: "base64", media_type: "image/png", data: image.base64 } });
+    }
+    return content;
+  }
+}
+
+/** The metadata keys, their types and values, as a line each, for the agent to write filters from. */
+export function describe(schema: Schema): string {
+  if (!schema.keys.length) return "The documents have no metadata, so there is nothing to filter on.";
+  const lines = [`Metadata keys of the ${schema.documents} documents:`];
+  for (const key of schema.keys) {
+    let line = `- ${key.key}: ${key.types.join(" or ")}, on ${key.documents} documents`;
+    if (key.min !== undefined && key.min !== null) line += `; ${key.min} to ${key.max}`;
+    if (key.values?.length) {
+      const shown = key.values.map((v) => `${JSON.stringify(v.value)} (${v.documents})`).join(", ");
+      const more = key.values.reduce((n, v) => n + v.documents, 0) < key.documents;
+      line += `; values: ${shown}` + (more ? ", and others" : "");
+    }
+    lines.push(line);
+  }
+  return lines.join("\n");
+}
+
+function topK(what: string): Record<string, unknown> {
+  return {
+    anyOf: [{ type: "string", enum: ["auto"] }, { type: "integer", minimum: 1, maximum: 50 }],
+    description: `"auto" (the default, and usually best): the ${what} likely to help. A number: exactly that many, ` +
+      "most relevant first, only when auto did not find enough.",
+  };
+}
+
+function auto(value: unknown): number | undefined {
+  return value === undefined || value === null || value === "auto" ? undefined : Number(value);
+}
+
+/**
+ * search_documents, search_pages, read_pages and view_pages over a scope: a collection, documents whose metadata
+ * meets a filter, or all of yours. The metadata schema is read once, when made; make new ones when the documents
+ * change.
+ */
+export class Tools {
+  readonly definitions: ToolDefinition[];
+
+  private constructor(
+    private readonly client: PageSearch,
+    private readonly collection: string | undefined,
+    private readonly filter: Filter | undefined,
+    readonly schema: Schema,
+  ) {
+    this.definitions = [this.searchDocumentsTool(), this.searchPagesTool(), this.readPagesTool(), this.viewPagesTool()];
+  }
+
+  static async create(client: PageSearch, options: { collection?: Collection | string; filter?: Filter } = {}): Promise<Tools> {
+    const collection = options.collection === undefined ? undefined
+      : typeof options.collection === "string" ? options.collection : options.collection.id;
+    const schema = collection !== undefined && options.filter === undefined
+      ? await client.collections.schema(collection)
+      : await client.documents.schema({ collection, filter: options.filter });
+    return new Tools(client, collection, options.filter, schema);
+  }
+
+  /** The definitions in OpenAI's function format. */
+  get openai(): Record<string, unknown>[] {
+    return this.definitions.map((d) => ({
+      type: "function", function: { name: d.name, description: d.description, parameters: d.input_schema },
+    }));
+  }
+
+  private searchDocumentsTool(): ToolDefinition {
+    return {
+      name: "search_documents",
+      description: `Find which of ${this.schema.documents} documents likely answer a question, most relevant first, ` +
+        "with each one's relevance (0 to 1), page count and metadata. Narrow them with a metadata filter when the " +
+        "question names something the metadata holds, such as a company or a year. Then call search_pages with the " +
+        'documents worth reading. Use top_k "auto": it returns the documents likely to help, which is best.\n\n' +
+        describe(this.schema) + "\n\n" + FILTERS,
+      input_schema: {
+        type: "object",
+        properties: {
+          question: { type: "string", description: "The question, as a person would ask it." },
+          filter: { type: "object", description: "Only documents whose metadata meets this." },
+          top_k: topK("documents"),
+        },
+        required: ["question"],
+      },
+    };
+  }
+
+  private searchPagesTool(): ToolDefinition {
+    return {
+      name: "search_pages",
+      description: "Find the pages that help answer a question, in documents search_documents found, most relevant " +
+        "first, each with its relevance (0 to 1) and text. Pages are numbered from 1. A page whose read is \"image\" " +
+        "is a picture, such as a scan or a chart: its text may be incomplete or empty, so look at it with " +
+        'read_pages. Use top_k "auto": it returns the pages likely to help, which is best, and a number brings back ' +
+        "many pages of text. The most relevant pages usually hold the answer: once they do, stop searching.",
+      input_schema: {
+        type: "object",
+        properties: {
+          question: { type: "string", description: "The question, as a person would ask it." },
+          document_ids: {
+            type: "array", items: { type: "string" }, minItems: 1, maxItems: MAX_PAGE_DOCUMENTS,
+            description: "The documents to search, from search_documents.",
+          },
+          top_k: topK("pages for each document"),
+        },
+        required: ["question", "document_ids"],
+      },
+    };
+  }
+
+  private readPagesTool(): ToolDefinition {
+    return {
+      name: "read_pages",
+      description: "Read pages of a document, numbered from 1: their text, with a picture of any page whose read is " +
+        '"image" (a scan or a chart, whose text may be incomplete). Use it for pages search_pages found that are ' +
+        "pictures, or for the pages around one, such as where a table goes on. At most " +
+        `${MAX_PAGES_READ} pages at a time, and at most ${MAX_IMAGES} of them pictures: in a scanned document every ` +
+        `page is a picture, so read ${MAX_IMAGES} at a time.`,
+      input_schema: {
+        type: "object",
+        properties: {
+          document_id: { type: "string" },
+          pages: { type: "array", items: { type: "integer", minimum: 1 }, minItems: 1, maxItems: MAX_PAGES_READ },
+        },
+        required: ["document_id", "pages"],
+      },
+    };
+  }
+
+  private viewPagesTool(): ToolDefinition {
+    return {
+      name: "view_pages",
+      description: `See pages of a document as pictures, with their text: up to ${MAX_IMAGES} at a time, numbered ` +
+        "from 1. Use it where how a page looks matters, such as a table's layout or a chart on a page of text.",
+      input_schema: {
+        type: "object",
+        properties: {
+          document_id: { type: "string" },
+          pages: { type: "array", items: { type: "integer", minimum: 1 }, minItems: 1, maxItems: MAX_IMAGES },
+        },
+        required: ["document_id", "pages"],
+      },
+    };
+  }
+
+  /**
+   * Calls a tool the agent asked for; what to send back as its result. An error comes back as {"error": ...}, for the
+   * agent to correct.
+   */
+  async run(name: string, input: Record<string, unknown>): Promise<ToolResult> {
+    try {
+      if (name === "search_documents") return new ToolResult(JSON.stringify(await this.searchDocuments(input)));
+      if (name === "search_pages") return new ToolResult(JSON.stringify(await this.searchPages(input)));
+      if (name === "read_pages") return await this.pages(input, MAX_PAGES_READ, (p) => p.read === "image");
+      if (name === "view_pages") return await this.pages(input, MAX_IMAGES, () => true);
+      return failed(`No tool ${name}.`);
+    } catch (error) {
+      if (error instanceof Error && error.name === "PageSearchError") return failed(error.message);
+      throw error;
+    }
+  }
+
+  private async searchDocuments(input: Record<string, unknown>): Promise<unknown> {
+    const filter = input.filter as Filter | undefined;
+    const scope = filter === undefined ? this.filter : this.filter === undefined ? filter : { $and: [this.filter, filter] };
+    const found = await this.client.documents.search(String(input.question), {
+      collection: this.collection, filter: scope, topK: auto(input.top_k),
+    });
+    return {
+      documents: found.results[0].documents.map((d) => ({
+        document_id: d.document_id, filename: d.filename, pages: d.pages, relevance: d.relevance, metadata: d.metadata,
+      })),
+    };
+  }
+
+  private async searchPages(input: Record<string, unknown>): Promise<unknown> {
+    const named = [...new Set((input.document_ids as string[] | undefined) ?? [])];
+    if (named.length < 1 || named.length > MAX_PAGE_DOCUMENTS) return { error: `Name 1 to ${MAX_PAGE_DOCUMENTS} documents.` };
+    const question = String(input.question);
+    const top = auto(input.top_k);
+    const result = named.length === 1
+      ? await this.client.search(question, { document: named[0], topK: top, includeText: true })
+      : await this.client.search(question, { documentIds: named, documentTopK: named.length, topK: top, includeText: true });
+    return {
+      documents: result.results[0].documents.map((d) => ({
+        document_id: d.document_id, filename: d.filename,
+        pages: d.pages.map((p) => ({ page: p.page, relevance: p.relevance, read: p.read, text: p.text })),
+      })),
+    };
+  }
+
+  /** The pages' text, and pictures of those pictured picks. */
+  private async pages(input: Record<string, unknown>, most: number, pictured: (page: PageText) => boolean): Promise<ToolResult> {
+    const documentId = String(input.document_id ?? "");
+    const named = [...new Set((input.pages as number[] | undefined) ?? [])];
+    if (!documentId || named.length < 1 || named.length > most) return failed(`Name a document_id and 1 to ${most} pages.`);
+    const texts = await this.client.documents.pages(documentId, named);
+    const shown = texts.filter(pictured).map((p) => p.page);
+    if (shown.length > MAX_IMAGES) {
+      return failed(`Pages ${shown.join(", ")} are pictures; read at most ${MAX_IMAGES} of them at a time.`);
+    }
+    const pngs = await Promise.all(shown.map((page) => this.client.documents.pageImage(documentId, page)));
+    const out = {
+      document_id: documentId,
+      pages: texts.map((p) => ({
+        page: p.page, read: p.read, text: p.text,
+        ...(p.read === "image" ? { note: "Its text may be incomplete: see its picture." } : {}),
+      })),
+    };
+    return new ToolResult(JSON.stringify(out), shown.map((page, i) => new PageImage(documentId, page, pngs[i])));
+  }
+}
+
+function failed(message: string): ToolResult {
+  return new ToolResult(JSON.stringify({ error: message }));
+}
+
+function toBase64(bytes: Uint8Array): string {
+  const B = (globalThis as { Buffer?: { from(b: Uint8Array): { toString(enc: string): string } } }).Buffer;
+  if (B) return B.from(bytes).toString("base64");
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(binary);
+}

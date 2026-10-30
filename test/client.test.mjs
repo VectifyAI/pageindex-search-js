@@ -231,3 +231,56 @@ test("schema: of a collection, or of documents meeting a filter", async () => {
   assert.equal(url.pathname, "/v1/documents/schema");
   assert.deepEqual(JSON.parse(url.searchParams.get("filter")), { ticker: "NVDA" });
 });
+
+test("tools: schema in the description, searches, and pages with pictures", async () => {
+  const seen = [];
+  const fetch = async (url, init) => {
+    const u = new URL(String(url));
+    seen.push({ path: u.pathname, query: Object.fromEntries(u.searchParams), body: init.body ? JSON.parse(init.body) : null });
+    const json = (body, status = 200) => new Response(JSON.stringify(body), { status });
+    if (u.pathname.endsWith("/schema")) {
+      return json({ object: "schema", collection_id: "col_1", documents: 3, keys: [
+        { key: "ticker", types: ["string"], documents: 3, values: [{ value: "MMM", documents: 2 }] },
+        { key: "year", types: ["number"], documents: 3, min: 2018, max: 2024 }] });
+    }
+    if (u.pathname.endsWith("/image")) return new Response(new Uint8Array([137, 80, 78, 71]), { status: 200 });
+    if (u.pathname.endsWith("/pages")) {
+      if (u.searchParams.get("pages") === "99") return json({ error: { code: "invalid_request", message: "There is no page 99." } }, 422);
+      return json({ object: "list", data: u.searchParams.get("pages").split(",").map((p) => (
+        { object: "page", page: Number(p), read: p === "7" ? "image" : "text", text: `text ${p}` })) });
+    }
+    if (u.pathname.endsWith("/documents/search")) {
+      return json({ object: "document_search", id: "dsrch_1", results: [{ question: "q", documents: [
+        { document_id: "doc_1", relevance: 0.9, filename: "a.pdf", pages: 10, metadata: { year: 2018 } }] }],
+        failed_documents: [], processing_documents: [] });
+    }
+    return json({ object: "search", id: "srch_1", results: [{ question: "q", documents: [
+      { document_id: "doc_1", filename: "a.pdf", pages: [{ page: 4, relevance: 1, read: "image", text: "Chart" }] }] }],
+      failed_documents: [], processing_documents: [] });
+  };
+  const client = new PageSearch({ apiKey: "pis_live_x", fetch });
+  const tools = await client.tools({ collection: "col_1", filter: { audited: true } });
+  assert.match(tools.definitions[0].description, /- ticker: string, on 3 documents; values: "MMM" \(2\), and others/);
+  assert.match(tools.definitions[0].description, /- year: number, on 3 documents; 2018 to 2024/);
+  assert.deepEqual(tools.openai.map((t) => t.function.name), ["search_documents", "search_pages", "read_pages", "view_pages"]);
+
+  let out = JSON.parse((await tools.run("search_documents", { question: "q", filter: { year: 2018 }, top_k: "auto" })).text);
+  assert.equal(out.documents[0].document_id, "doc_1");
+  assert.deepEqual(seen.at(-1).body, { questions: ["q"], collection_id: "col_1", filter: { $and: [{ audited: true }, { year: 2018 }] } });
+
+  out = JSON.parse((await tools.run("search_pages", { question: "q", document_ids: ["doc_1", "doc_2"] })).text);
+  assert.deepEqual(out.documents[0].pages, [{ page: 4, relevance: 1, read: "image", text: "Chart" }]);
+  assert.deepEqual(seen.at(-1).body, { questions: ["q"], document_ids: ["doc_1", "doc_2"], document_top_k: 2, include_text: true });
+  await tools.run("search_pages", { question: "q", document_ids: ["doc_1"], top_k: 3 });
+  assert.deepEqual(seen.at(-1).body, { questions: ["q"], document_id: "doc_1", top_k: 3, include_text: true });
+
+  let result = await tools.run("read_pages", { document_id: "doc_1", pages: [4, 7, 4] });
+  assert.deepEqual(JSON.parse(result.text).pages.map((p) => [p.page, p.read]), [[4, "text"], [7, "image"]]);
+  assert.deepEqual(result.images.map((i) => i.page), [7]);
+  assert.equal(result.images[0].dataUrl, "data:image/png;base64,iVBORw==");
+  assert.equal(result.anthropic()[1].text, "Page 7 of doc_1:");
+  result = await tools.run("view_pages", { document_id: "doc_1", pages: [4, 9] });
+  assert.deepEqual(result.images.map((i) => i.page), [4, 9]);
+  assert.deepEqual(JSON.parse((await tools.run("read_pages", { document_id: "doc_1", pages: [99] })).text), { error: "There is no page 99." });
+  assert.match((await tools.run("view_pages", { document_id: "doc_1", pages: [1, 2, 3, 4, 5, 6] })).text, /error/);
+});

@@ -1,6 +1,6 @@
 // The Page Search API client: upload PDFs, then search their pages with up to 10 questions at once.
 
-export const VERSION = "0.4.2";
+export const VERSION = "0.5.0";
 export const DEFAULT_BASE_URL = "https://api.search.pageindex.ai/v1";
 const API_KEY_ENV = "PAGEINDEX_SEARCH_API_KEY";
 // Retried, after a short wait that doubles: the server was busy or briefly unreachable.
@@ -42,6 +42,19 @@ export interface Collection {
 export interface Page {
   page: number; // numbered from 1
   relevance: number; // from 0 to 1: how likely the page helps answer the question
+  /** "text", or "image": a picture, such as a scan or a chart, whose text may be incomplete. */
+  read: "text" | "image";
+  /** With includeText. */
+  text?: string;
+}
+
+/** A page's text, from client.documents.pages(). */
+export interface PageText {
+  object: "page";
+  page: number; // numbered from 1
+  /** "text", or "image": a picture, such as a scan or a chart, whose text may be incomplete. */
+  read: "text" | "image";
+  text: string;
 }
 
 /** A document a search found pages in, with those pages. */
@@ -171,6 +184,7 @@ type Request = <T>(
     body?: FormData;
     json?: unknown;
     headers?: Record<string, string>;
+    raw?: boolean;
   },
 ) => Promise<T>;
 
@@ -316,6 +330,19 @@ export class Documents {
     const collection_id = options.collection === undefined ? undefined : id(options.collection);
     const filter = options.filter === undefined ? undefined : JSON.stringify(options.filter);
     return this.request<Schema>("GET", "/documents/schema", { query: { collection_id, filter } });
+  }
+
+  /** The text of up to 20 pages, numbered from 1, in the order named, each with how it is best read. */
+  async pages(document: Document | string, pages: number[]): Promise<PageText[]> {
+    const out = await this.request<{ data: PageText[] }>("GET", `/documents/${encodeURIComponent(id(document))}/pages`, {
+      query: { pages: pages.join(",") },
+    });
+    return out.data;
+  }
+
+  /** A page as PNG bytes, no side past 1568 pixels. */
+  pageImage(document: Document | string, page: number): Promise<Uint8Array> {
+    return this.request<Uint8Array>("GET", `/documents/${encodeURIComponent(id(document))}/pages/${page}/image`, { raw: true });
   }
 
   /** Deletes a document and its pages; searches of it then fail. */
@@ -480,14 +507,15 @@ export class PageSearch {
    *
    * Across documents, the most relevant documents for each question are found first and only their pages searched:
    * those likely to answer, at most maxDocuments (default 3), or exactly documentTopK. Without topK, each document lists the pages likely to help, possibly none; with it,
-   * exactly topK. Retries send the same idempotencyKey (a new one by default), so a search retried after a timeout is
-   * not run or charged twice; pass your own to make your own retries safe too.
+   * exactly topK, each with how it is best read, and with includeText, its text. Retries send the same idempotencyKey
+   * (a new one by default), so a search retried after a timeout is not run or charged twice; pass your own to make
+   * your own retries safe too.
    */
   search(
     questions: string | string[],
     options: {
       document?: Document | string; documentIds?: (Document | string)[]; collection?: Collection | string; filter?: Filter;
-      maxDocuments?: number; documentTopK?: number; topK?: number; idempotencyKey?: string;
+      maxDocuments?: number; documentTopK?: number; topK?: number; includeText?: boolean; idempotencyKey?: string;
     } = {},
   ): Promise<SearchResult> {
     if (typeof options === "string" || Array.isArray(options) || (typeof questions === "object" && !Array.isArray(questions))) {
@@ -501,10 +529,21 @@ export class PageSearch {
     if (options.maxDocuments !== undefined) body.max_documents = options.maxDocuments;
     if (options.documentTopK !== undefined) body.document_top_k = options.documentTopK;
     if (options.topK !== undefined) body.top_k = options.topK;
+    if (options.includeText) body.include_text = true;
     return this.request<SearchResult>("POST", "/search", {
       json: body,
       headers: { "Idempotency-Key": options.idempotencyKey ?? newKey() },
     });
+  }
+
+  /**
+   * Tools for an LLM agent over a collection, documents whose metadata meets filter, or all of yours:
+   * search_documents, search_pages, read_pages and view_pages. Their descriptions hold the metadata schema, read
+   * now, so the agent can write filters: pass tools.definitions (or tools.openai) to the model, and
+   * await tools.run(name, input) for its tool calls.
+   */
+  tools(options: { collection?: Collection | string; filter?: Filter } = {}): Promise<Tools> {
+    return Tools.create(this, options);
   }
 
   // Account
@@ -524,6 +563,7 @@ export class PageSearch {
     path: string,
     options: {
       query?: Record<string, string | number | undefined>; json?: unknown; body?: FormData; headers?: Record<string, string>;
+      raw?: boolean;
     } = {},
   ): Promise<T> {
     const url = new URL(this.baseURL + path);
@@ -553,6 +593,7 @@ export class PageSearch {
         await sleep(500 * 2 ** attempt);
         continue;
       }
+      if (options.raw && response.ok) return new Uint8Array(await response.arrayBuffer()) as T;
       return parse<T>(response);
     }
   }
@@ -606,5 +647,8 @@ async function parse<T>(response: Response): Promise<T> {
     requestId: error.request_id ?? requestId,
   });
 }
+
+export { PageImage, ToolResult, Tools } from "./tools.js";
+import { Tools } from "./tools.js";
 
 export default PageSearch;
