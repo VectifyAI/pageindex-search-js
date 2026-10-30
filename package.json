@@ -1,6 +1,6 @@
 {
   "name": "@pageindex/search",
-  "version": "0.5.0",
+  "version": "0.5.2",
   "description": "JavaScript client for Page Search API by PageIndex: find the pages of a PDF that answer your questions.",
   "license": "MIT",
   "author": "PageIndex <support@pageindex.ai>",

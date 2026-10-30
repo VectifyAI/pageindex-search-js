@@ -255,7 +255,8 @@ test("tools: schema in the description, searches, and pages with pictures", asyn
         failed_documents: [], processing_documents: [] });
     }
     return json({ object: "search", id: "srch_1", results: [{ question: "q", documents: [
-      { document_id: "doc_1", filename: "a.pdf", pages: [{ page: 4, relevance: 1, read: "image", text: "Chart" }] }] }],
+      { document_id: "doc_1", filename: "a.pdf", pages: [{ page: 4, relevance: 1, read: "image", text: "Chart" }],
+        more_pages: [{ page: 5, relevance: 0.2, read: "text" }] }] }],
       failed_documents: [], processing_documents: [] });
   };
   const client = new PageSearch({ apiKey: "pis_live_x", fetch });
@@ -264,14 +265,16 @@ test("tools: schema in the description, searches, and pages with pictures", asyn
   assert.match(tools.definitions[0].description, /- year: number, on 3 documents; 2018 to 2024/);
   assert.deepEqual(tools.openai.map((t) => t.function.name), ["search_documents", "search_pages", "read_pages", "view_pages"]);
 
-  let out = JSON.parse((await tools.run("search_documents", { question: "q", filter: { year: 2018 }, top_k: "auto" })).text);
-  assert.equal(out.documents[0].document_id, "doc_1");
+  let out = JSON.parse((await tools.run("search_documents", { questions: ["q"], filter: { year: 2018 }, top_k: "auto" })).text);
+  assert.equal(out.results[0].documents[0].document_id, "doc_1");
   assert.deepEqual(seen.at(-1).body, { questions: ["q"], collection_id: "col_1", filter: { $and: [{ audited: true }, { year: 2018 }] } });
 
-  out = JSON.parse((await tools.run("search_pages", { question: "q", document_ids: ["doc_1", "doc_2"] })).text);
-  assert.deepEqual(out.documents[0].pages, [{ page: 4, relevance: 1, read: "image", text: "Chart" }]);
-  assert.deepEqual(seen.at(-1).body, { questions: ["q"], document_ids: ["doc_1", "doc_2"], document_top_k: 2, include_text: true });
-  await tools.run("search_pages", { question: "q", document_ids: ["doc_1"], top_k: 3 });
+  out = JSON.parse((await tools.run("search_pages", { question: "q", document_id: "doc_1", top_k: "auto" })).text);
+  assert.deepEqual(out.results[0].pages, [{ page: 4, relevance: 1, read: "image", text: "Chart" }]);
+  assert.deepEqual(out.results[0].more_pages, [{ page: 5, relevance: 0.2, read: "text" }]);
+  assert.deepEqual(seen.at(-1).body, { questions: ["q"], document_id: "doc_1", include_text: true });
+  assert.match((await tools.run("search_pages", { question: "q", document_ids: ["doc_1"] })).text, /error/);
+  await tools.run("search_pages", { question: "q", document_id: "doc_1", top_k: 3 });
   assert.deepEqual(seen.at(-1).body, { questions: ["q"], document_id: "doc_1", top_k: 3, include_text: true });
 
   let result = await tools.run("read_pages", { document_id: "doc_1", pages: [4, 7, 4] });
