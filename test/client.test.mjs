@@ -296,7 +296,8 @@ test("tools: schema in the description, searches, and pages with pictures", asyn
   assert.deepEqual(seen.at(-1).body, { questions: ["q"], collection_id: "col_1", filter: { $and: [{ audited: true }, { year: 2018 }] } });
 
   out = JSON.parse((await tools.run("search_pages", { question: "q", document_id: "doc_1", top_k: "auto" })).text);
-  assert.deepEqual(out.results[0].pages, [{ page: 4, relevance: 1, read: "image", text: "Chart" }]);
+  assert.deepEqual(out.results[0].pages, [{ page: 4, relevance: 1, read: "image", text: "Chart",
+    note: "A picture: its text may be incomplete or wrong. See it with read_pages before answering from it." }]);
   assert.deepEqual(out.results[0].more_pages, [{ page: 5, relevance: 0.2, read: "text" }]);
   assert.deepEqual(seen.at(-1).body, { questions: ["q"], document_id: "doc_1", include_text: true });
   assert.match((await tools.run("search_pages", { question: "q", document_ids: ["doc_1"] })).text, /error/);
@@ -305,6 +306,7 @@ test("tools: schema in the description, searches, and pages with pictures", asyn
 
   let result = await tools.run("read_pages", { document_id: "doc_1", pages: [4, 7, 4] });
   assert.deepEqual(JSON.parse(result.text).pages.map((p) => [p.page, p.read]), [[4, "text"], [7, "image"]]);
+  assert.match(JSON.parse(result.text).pages[1].note, /zooming in with zoom_page/);
   assert.deepEqual(result.images.map((i) => i.page), [7]);
   assert.equal(result.images[0].dataUrl, "data:image/png;base64,iVBORw==");
   assert.equal(result.anthropic()[1].text, "Page 7 of doc_1:");

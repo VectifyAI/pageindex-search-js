@@ -28,6 +28,11 @@ const BOX = {
     '{"x0": 0, "y0": 0.3, "x1": 1, "y1": 0.6} is the band from 30% to 60% of the way down, full width.',
 };
 
+// The notes on a page whose read is "image", in search_pages and in read_pages.
+const PICTURED = "A picture: its text may be incomplete or wrong. See it with read_pages before answering from it.";
+const SEE_PICTURE = "A picture: its text may be incomplete or wrong. Read what you need from the picture, zooming in " +
+  "with zoom_page where the print is small.";
+
 const QUESTIONS = {
   type: "array", items: { type: "string" }, minItems: 1, maxItems: MAX_QUESTIONS,
   description: "The questions, as a person would ask them: several at once cost much less than one at a time, so ask " +
@@ -349,7 +354,10 @@ export class Tools {
         const d = a.documents[0];
         return {
           question: a.question,
-          pages: d.pages.map((p) => ({ page: p.page, relevance: p.relevance, read: p.read, text: p.text })),
+          pages: d.pages.map((p) => ({
+            page: p.page, relevance: p.relevance, read: p.read, text: p.text,
+            ...(p.read === "image" ? { note: PICTURED } : {}),
+          })),
           ...(d.more_pages?.length
             ? { more_pages: d.more_pages.map((p) => ({ page: p.page, relevance: p.relevance, read: p.read })) } : {}),
         };
@@ -388,7 +396,7 @@ export class Tools {
       document_id: documentId,
       pages: texts.map((p) => ({
         page: p.page, read: p.read, text: p.text,
-        ...(p.read === "image" ? { note: "Its text may be incomplete: see its picture." } : {}),
+        ...(p.read === "image" ? { note: SEE_PICTURE } : {}),
       })),
     };
     return new ToolResult(JSON.stringify(out), shown.map((page, i) => new PageImage(documentId, page, pngs[i])));
