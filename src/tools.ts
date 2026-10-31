@@ -1,6 +1,6 @@
 /**
  * Tools an LLM agent can call: find which documents answer, search the pages of the ones it picks (with their
- * text), and read pages, with pictures of those best seen.
+ * text), read pages, with pictures of those best seen, and zoom in on a part of a page too small to read.
  *
  *     const tools = await client.tools({ collection: filings });
  *     const response = await anthropic.messages.create({ ..., tools: tools.definitions });
@@ -13,6 +13,12 @@ import type { Collection, Filter, PageSearch, PageText, Schema } from "./index.j
 const MAX_PAGES_READ = 20; // pages one read_pages call may read
 const MAX_IMAGES = 5; // pictures one read_pages call may give: each is some thousands of tokens
 const MAX_QUESTIONS = 10; // questions one search may ask
+
+const REGION = {
+  type: "array", items: { type: "number", minimum: 0, maximum: 1 }, minItems: 4, maxItems: 4,
+  description: "[top, left, bottom, right] as fractions of the page's height and width, from 0 to 1: " +
+    "[0.3, 0, 0.6, 1] is the band from 30% to 60% of the way down, full width.",
+};
 
 const QUESTIONS = {
   type: "array", items: { type: "string" }, minItems: 1, maxItems: MAX_QUESTIONS,
@@ -30,9 +36,15 @@ export interface ToolDefinition {
   input_schema: Record<string, unknown>;
 }
 
-/** A page as PNG bytes. */
+/** A page as PNG bytes, or, with region, part of it. */
 export class PageImage {
-  constructor(readonly documentId: string, readonly page: number, readonly png: Uint8Array) {}
+  constructor(readonly documentId: string, readonly page: number, readonly png: Uint8Array, readonly region?: number[]) {}
+
+  /** What the picture is, to put before it: "Page 7 of doc_...:". */
+  get label(): string {
+    const part = this.region ? `, region [${this.region.join(", ")}]` : "";
+    return `Page ${this.page} of ${this.documentId}${part}:`;
+  }
 
   get base64(): string {
     return toBase64(this.png);
@@ -53,7 +65,7 @@ export class ToolResult {
     if (!this.images.length) return this.text;
     const content: Record<string, unknown>[] = [{ type: "text", text: this.text }];
     for (const image of this.images) {
-      content.push({ type: "text", text: `Page ${image.page} of ${image.documentId}:` });
+      content.push({ type: "text", text: image.label });
       content.push({ type: "image", source: { type: "base64", media_type: "image/png", data: image.base64 } });
     }
     return content;
@@ -95,8 +107,8 @@ function auto(value: unknown): number | undefined {
 }
 
 /**
- * search_documents, search_pages, read_pages and view_pages over a scope: a collection, documents whose metadata
- * meets a filter, or all of yours. The metadata schema is read once, when made; make new ones when the documents
+ * search_documents, search_pages, read_pages, view_pages and zoom_page over a scope: a collection, documents whose
+ * metadata meets a filter, or all of yours. The metadata schema is read once, when made; make new ones when the documents
  * change.
  */
 export class Tools {
@@ -108,7 +120,9 @@ export class Tools {
     private readonly filter: Filter | undefined,
     readonly schema: Schema,
   ) {
-    this.definitions = [this.searchDocumentsTool(), this.searchPagesTool(), this.readPagesTool(), this.viewPagesTool()];
+    this.definitions = [
+      this.searchDocumentsTool(), this.searchPagesTool(), this.readPagesTool(), this.viewPagesTool(), this.zoomPageTool(),
+    ];
   }
 
   static async create(client: PageSearch, options: { collection?: Collection | string; filter?: Filter } = {}): Promise<Tools> {
@@ -180,7 +194,8 @@ export class Tools {
         '"image" (a scan or a chart, whose text may be incomplete). Use it for pages search_pages found that are ' +
         "pictures, or for the pages around one, such as where a table goes on. At most " +
         `${MAX_PAGES_READ} pages at a time, and at most ${MAX_IMAGES} of them pictures: in a scanned document every ` +
-        `page is a picture, so read ${MAX_IMAGES} at a time.`,
+        `page is a picture, so read ${MAX_IMAGES} at a time. If a picture's small print or figures are hard to read, ` +
+        "zoom in with zoom_page.",
       input_schema: {
         type: "object",
         properties: {
@@ -196,7 +211,8 @@ export class Tools {
     return {
       name: "view_pages",
       description: `See pages of a document as pictures, with their text: up to ${MAX_IMAGES} at a time, numbered ` +
-        "from 1. Use it where how a page looks matters, such as a table's layout or a chart on a page of text.",
+        "from 1. Use it where how a page looks matters, such as a table's layout or a chart on a page of text. If " +
+        "small print or figures are hard to read, zoom in with zoom_page before answering.",
       input_schema: {
         type: "object",
         properties: {
@@ -204,6 +220,24 @@ export class Tools {
           pages: { type: "array", items: { type: "integer", minimum: 1 }, minItems: 1, maxItems: MAX_IMAGES },
         },
         required: ["document_id", "pages"],
+      },
+    };
+  }
+
+  private zoomPageTool(): ToolDefinition {
+    return {
+      name: "zoom_page",
+      description: "See part of a page, sharper: for small print, a dense table's figures or a footnote that are hard " +
+        "to read in a picture from read_pages or view_pages. Look at the whole page first, then zoom on the part you " +
+        "need, a band no taller than about a third of the page. Free, as reading pages is.",
+      input_schema: {
+        type: "object",
+        properties: {
+          document_id: { type: "string" },
+          page: { type: "integer", minimum: 1 },
+          region: REGION,
+        },
+        required: ["document_id", "page", "region"],
       },
     };
   }
@@ -222,6 +256,7 @@ export class Tools {
       if (name === "search_pages") return new ToolResult(JSON.stringify(await this.searchPages(input)));
       if (name === "read_pages") return await this.pages(input, MAX_PAGES_READ, (p) => p.read === "image");
       if (name === "view_pages") return await this.pages(input, MAX_IMAGES, () => true);
+      if (name === "zoom_page") return await this.zoom(input);
       return failed(`No tool ${name}.`);
     } catch (error) {
       if (error instanceof Error && error.name === "PageSearchError") return failed(error.message);
@@ -264,6 +299,18 @@ export class Tools {
         };
       }),
     };
+  }
+
+  private async zoom(input: Record<string, unknown>): Promise<ToolResult> {
+    const documentId = String(input.document_id ?? "");
+    const page = Number(input.page);
+    const region = Array.isArray(input.region) ? input.region.map(Number) : [];
+    if (!documentId || !Number.isInteger(page) || region.length !== 4 || region.some((v) => !Number.isFinite(v))) {
+      return failed("Name a document_id, a page, and a region of four numbers: [top, left, bottom, right].");
+    }
+    const png = await this.client.documents.pageImage(documentId, page, { region });
+    return new ToolResult(JSON.stringify({ document_id: documentId, page, region }),
+      [new PageImage(documentId, page, png, region)]);
   }
 
   /** The pages' text, and pictures of those pictured picks. */

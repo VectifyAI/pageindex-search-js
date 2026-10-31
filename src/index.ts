@@ -1,6 +1,6 @@
 // The Page Search API client: upload PDFs, then search their pages with up to 10 questions at once.
 
-export const VERSION = "0.5.2";
+export const VERSION = "0.6.0";
 export const DEFAULT_BASE_URL = "https://api.search.pageindex.ai/v1";
 const API_KEY_ENV = "PAGEINDEX_SEARCH_API_KEY";
 // Retried, after a short wait that doubles: the server was busy or briefly unreachable.
@@ -105,7 +105,7 @@ export interface DocumentSearchResult {
   results: DocumentAnswer[]; // one for each question, in the order asked
   failed_documents: string[]; // could not be judged just now; not charged
   processing_documents: string[]; // still being made; not searched
-  // Each document is priced as a page.
+  // Each document at the document search price.
   usage: { documents: number; questions: number; billable_documents: number; cost_usd: number; balance_usd: number };
   seconds: number;
 }
@@ -342,9 +342,12 @@ export class Documents {
     return out.data;
   }
 
-  /** A page as PNG bytes, no side past 1568 pixels. */
-  pageImage(document: Document | string, page: number): Promise<Uint8Array> {
-    return this.request<Uint8Array>("GET", `/documents/${encodeURIComponent(id(document))}/pages/${page}/image`, { raw: true });
+  /** A page as PNG bytes, no side past 1568 pixels; with region, [top, left, bottom, right] as fractions of the
+   * page, only that part of it, drawn sharper: to read small print. */
+  pageImage(document: Document | string, page: number, options: { region?: number[] } = {}): Promise<Uint8Array> {
+    return this.request<Uint8Array>("GET", `/documents/${encodeURIComponent(id(document))}/pages/${page}/image`, {
+      raw: true, query: { region: options.region?.join(",") },
+    });
   }
 
   /** Deletes a document and its pages; searches of it then fail. */
@@ -358,7 +361,7 @@ export class Documents {
    *
    * Every document of yours (up to 1,000), only those in documentIds, or only those in a collection and those whose
    * metadata meets filter. Without topK, each answer lists the
-   * documents likely to help, possibly none; with it, exactly topK. Each document is priced as a page. Retries
+   * documents likely to help, possibly none; with it, exactly topK. Each document is priced at the document search price. Retries
    * send the same idempotencyKey, as client.search() does.
    */
   search(

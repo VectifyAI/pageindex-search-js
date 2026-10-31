@@ -87,13 +87,15 @@ text.
 ```js
 const texts = await client.documents.pages(doc, [38, 39]); // each with .text and .read
 const png = await client.documents.pageImage(doc, 38);     // PNG bytes
+const part = await client.documents.pageImage(doc, 38, { region: [0.3, 0, 0.6, 1] }); // a band of it, sharper
 ```
 
 ## Agents
 
-`client.tools()` gives an LLM agent four tools over your documents: `search_documents` (with your metadata's keys
+`client.tools()` gives an LLM agent five tools over your documents: `search_documents` (with your metadata's keys
 and values in its description, so the agent can write filters), `search_pages` (with each page's text),
-`read_pages` (text, with a picture of any page that is one) and `view_pages` (pages as pictures).
+`read_pages` (text, with a picture of any page that is one), `view_pages` (pages as pictures) and `zoom_page`
+(part of a page, sharper, for small print).
 
 ```js
 const tools = await client.tools({ collection: reports }); // or { filter }, or neither for all your documents
@@ -115,10 +117,10 @@ For OpenAI, pass `tools.openai`; `tools.run()` gives `.text` and `.images`, each
 | `new PageSearch({ apiKey, baseURL, timeout, maxRetries })` | The key defaults to `PAGEINDEX_SEARCH_API_KEY`; `timeout` is in milliseconds (default 120,000). |
 | `documents.upload(file, { filename, collection, metadata, wait })` | A path, or the file's bytes (`Uint8Array`, `ArrayBuffer`, `Blob`). Resolves to a `Document`, ready to search unless `wait: false`. |
 | `search(questions, { document, documentIds, collection, filter, maxDocuments, documentTopK, topK, includeText, idempotencyKey })` | Up to 10 questions. For each, the pages that help, under the documents they are in: of one document, or across documents (those named, a collection's, those meeting `filter`, or all), whose most relevant are opened: those likely to answer, at most `maxDocuments` (default 3), or exactly `documentTopK`. Each document lists the pages likely to help, or exactly `topK`, each with how it is best read, and with `includeText`, its text; without `topK`, `more_pages` lists the next most relevant, without text. A search retried after a timeout is not charged twice. |
-| `documents.search(questions, { documentIds, collection, filter, topK, idempotencyKey })` | Up to 10 questions of your documents (all of them, up to 1,000, those named, or a collection's). Each answer lists the documents likely to hold it, or exactly `topK`. Each document is priced as a page. |
+| `documents.search(questions, { documentIds, collection, filter, topK, idempotencyKey })` | Up to 10 questions of your documents (all of them, up to 1,000, those named, or a collection's). Each answer lists the documents likely to hold it, or exactly `topK`. Each document is priced at the document search price. |
 | `documents.list({ limit, after, collection, filter })` | Your documents, newest first, or a collection's, or those whose metadata meets `filter`. `for await` over it for every document; `await` it for one page (`data`, `has_more`). |
 | `documents.get(id)`, `documents.delete(document)` | One document; delete one. |
-| `documents.pages(document, pages)`, `documents.pageImage(document, page)` | The text of up to 20 pages, each with how it is best read; a page as PNG bytes. |
+| `documents.pages(document, pages)`, `documents.pageImage(document, page, { region })` | The text of up to 20 pages, each with how it is best read; a page as PNG bytes, or with `region` ([top, left, bottom, right] as fractions) part of it, sharper. |
 | `tools({ collection, filter })` | Tools for an LLM agent: `.definitions` (Anthropic), `.openai`, and `.run(name, input)`. |
 | `documents.update(document, { metadata })` | Set metadata keys; `null` removes one. |
 | `collections.schema(collection)`, `documents.schema({ collection, filter })` | The metadata keys the documents have: each key's types, how many documents have it, its least and greatest numbers and commonest strings. Counted as they are now; nothing is enforced. |

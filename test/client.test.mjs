@@ -234,6 +234,7 @@ test("schema: of a collection, or of documents meeting a filter", async () => {
 
 test("tools: schema in the description, searches, and pages with pictures", async () => {
   const seen = [];
+  const regions = []; // each picture asked for: its region, or null
   const fetch = async (url, init) => {
     const u = new URL(String(url));
     seen.push({ path: u.pathname, query: Object.fromEntries(u.searchParams), body: init.body ? JSON.parse(init.body) : null });
@@ -243,7 +244,10 @@ test("tools: schema in the description, searches, and pages with pictures", asyn
         { key: "ticker", types: ["string"], documents: 3, values: [{ value: "MMM", documents: 2 }] },
         { key: "year", types: ["number"], documents: 3, min: 2018, max: 2024 }] });
     }
-    if (u.pathname.endsWith("/image")) return new Response(new Uint8Array([137, 80, 78, 71]), { status: 200 });
+    if (u.pathname.endsWith("/image")) {
+      regions.push(u.searchParams.get("region"));
+      return new Response(new Uint8Array([137, 80, 78, 71]), { status: 200 });
+    }
     if (u.pathname.endsWith("/pages")) {
       if (u.searchParams.get("pages") === "99") return json({ error: { code: "invalid_request", message: "There is no page 99." } }, 422);
       return json({ object: "list", data: u.searchParams.get("pages").split(",").map((p) => (
@@ -263,7 +267,8 @@ test("tools: schema in the description, searches, and pages with pictures", asyn
   const tools = await client.tools({ collection: "col_1", filter: { audited: true } });
   assert.match(tools.definitions[0].description, /- ticker: string, on 3 documents; values: "MMM" \(2\), and others/);
   assert.match(tools.definitions[0].description, /- year: number, on 3 documents; 2018 to 2024/);
-  assert.deepEqual(tools.openai.map((t) => t.function.name), ["search_documents", "search_pages", "read_pages", "view_pages"]);
+  assert.deepEqual(tools.openai.map((t) => t.function.name),
+    ["search_documents", "search_pages", "read_pages", "view_pages", "zoom_page"]);
 
   let out = JSON.parse((await tools.run("search_documents", { questions: ["q"], filter: { year: 2018 }, top_k: "auto" })).text);
   assert.equal(out.results[0].documents[0].document_id, "doc_1");
@@ -286,4 +291,9 @@ test("tools: schema in the description, searches, and pages with pictures", asyn
   assert.deepEqual(result.images.map((i) => i.page), [4, 9]);
   assert.deepEqual(JSON.parse((await tools.run("read_pages", { document_id: "doc_1", pages: [99] })).text), { error: "There is no page 99." });
   assert.match((await tools.run("view_pages", { document_id: "doc_1", pages: [1, 2, 3, 4, 5, 6] })).text, /error/);
+  result = await tools.run("zoom_page", { document_id: "doc_1", page: 4, region: [0.3, 0, 0.6, 1] });
+  assert.deepEqual(JSON.parse(result.text), { document_id: "doc_1", page: 4, region: [0.3, 0, 0.6, 1] });
+  assert.equal(regions.at(-1), "0.3,0,0.6,1");
+  assert.equal(result.anthropic()[1].text, "Page 4 of doc_1, region [0.3, 0, 0.6, 1]:");
+  assert.match((await tools.run("zoom_page", { document_id: "doc_1", page: 4, region: [0, 1] })).text, /error/);
 });
