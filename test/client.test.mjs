@@ -94,14 +94,15 @@ test("a retried search sends the same idempotency key", async () => {
 
 test("documents.list() goes through every page when looped over", async () => {
   const { fetch, seen } = fake(
-    [200, { data: [DOC, { ...DOC, id: "doc_2" }], has_more: true }],
-    [200, { data: [{ ...DOC, id: "doc_3" }], has_more: false }],
+    [200, { data: [DOC, { ...DOC, id: "doc_2" }], has_more: true, total: 3 }],
+    [200, { data: [{ ...DOC, id: "doc_3" }], has_more: false, total: 3 }],
   );
   const client = new PageSearch({ apiKey: "pis_live_x", fetch });
   const ids = [];
   for await (const doc of client.documents.list({ limit: 2 })) ids.push(doc.id);
   assert.deepEqual(ids, ["doc_1", "doc_2", "doc_3"]);
-  assert.match(seen[1].url, /after=doc_2/);
+  assert.match(seen[1].url, /offset=2/);
+  assert.doesNotMatch(seen[0].url, /offset/);
 });
 
 test("busy and unreachable are retried; other errors are not", async () => {
@@ -123,17 +124,19 @@ test("busy and unreachable are retried; other errors are not", async () => {
 });
 
 test("documents.list() awaited is one page", async () => {
-  const { fetch, seen } = fake([200, { data: [DOC], has_more: true }]);
+  const { fetch, seen } = fake([200, { data: [DOC], has_more: true, total: 9 }]);
   const client = new PageSearch({ apiKey: "pis_live_x", fetch });
-  const page = await client.documents.list({ limit: 1 });
+  const page = await client.documents.list({ limit: 1, offset: 2 });
   assert.deepEqual(page.data.map((d) => d.id), ["doc_1"]);
   assert.equal(page.has_more, true);
+  assert.equal(page.total, 9);
+  assert.equal(page.offset, 2);
   assert.equal(seen.length, 1);
-  assert.match(seen[0].url, /limit=1/);
+  assert.match(seen[0].url, /limit=1&offset=2/);
 });
 
 test("the names before 0.2 still work", async () => {
-  const { fetch } = fake([200, DOC], [200, { data: [DOC], has_more: false }]);
+  const { fetch } = fake([200, DOC], [200, { data: [DOC], has_more: false, total: 1 }]);
   const client = new PageSearch({ apiKey: "pis_live_x", fetch });
   const warn = console.warn;
   const warned = [];
@@ -169,8 +172,8 @@ test("collections: create, add, remove, and upload, list and search within one",
   const col = { object: "collection", id: "col_1", name: "Reports", documents: 2, created_at: "2026-10-29T00:00:00Z" };
   const found = { object: "document_search", id: "srch_1", results: [], failed_documents: [], processing_documents: [],
     usage: { documents: 0, questions: 1, billable_documents: 0, cost_usd: 0, balance_usd: 5 }, seconds: 0.1 };
-  const { fetch, seen } = fake([200, col], [200, col], [200, col], [200, DOC], [200, { data: [DOC], has_more: false }],
-    [200, found], [200, { data: [col], has_more: false }]);
+  const { fetch, seen } = fake([200, col], [200, col], [200, col], [200, DOC], [200, { data: [DOC], has_more: false, total: 1 }],
+    [200, found], [200, { data: [col], has_more: false, total: 1 }]);
   const client = new PageSearch({ apiKey: "pis_live_x", fetch });
   const made = await client.collections.create("Reports");
   assert.equal(made.id, "col_1");
@@ -199,7 +202,7 @@ test("metadata: set on upload and update; filter on list and search", async () =
   const doc = { ...DOC, metadata: { year: 2018 } };
   const found = { object: "document_search", id: "s", results: [], failed_documents: [], processing_documents: [],
     usage: { documents: 0, questions: 1, billable_documents: 0, cost_usd: 0, balance_usd: 5 }, seconds: 0.1 };
-  const { fetch, seen } = fake([200, doc], [200, doc], [200, { data: [doc], has_more: false }], [200, found]);
+  const { fetch, seen } = fake([200, doc], [200, doc], [200, { data: [doc], has_more: false, total: 1 }], [200, found]);
   const client = new PageSearch({ apiKey: "pis_live_x", fetch });
   await client.documents.upload(new Uint8Array([37, 80, 68, 70]), { metadata: { year: 2018 }, wait: false });
   await client.documents.update("doc_1", { metadata: { note: null } });
@@ -234,7 +237,7 @@ test("schema: of a collection, or of documents meeting a filter", async () => {
 
 test("tools: schema in the description, searches, and pages with pictures", async () => {
   const seen = [];
-  const regions = []; // each picture asked for: its region, or null
+  const boxes = []; // each picture asked for: its box, or null
   const fetch = async (url, init) => {
     const u = new URL(String(url));
     seen.push({ path: u.pathname, query: Object.fromEntries(u.searchParams), body: init.body ? JSON.parse(init.body) : null });
@@ -245,13 +248,17 @@ test("tools: schema in the description, searches, and pages with pictures", asyn
         { key: "year", types: ["number"], documents: 3, min: 2018, max: 2024 }] });
     }
     if (u.pathname.endsWith("/image")) {
-      regions.push(u.searchParams.get("region"));
+      boxes.push(u.searchParams.get("box"));
       return new Response(new Uint8Array([137, 80, 78, 71]), { status: 200 });
     }
     if (u.pathname.endsWith("/pages")) {
       if (u.searchParams.get("pages") === "99") return json({ error: { code: "invalid_request", message: "There is no page 99." } }, 422);
       return json({ object: "list", data: u.searchParams.get("pages").split(",").map((p) => (
         { object: "page", page: Number(p), read: p === "7" ? "image" : "text", text: `text ${p}` })) });
+    }
+    if (u.pathname === "/v1/documents" && !init.body) {
+      return json({ object: "list", has_more: true, total: 87, data: [{ object: "document", id: "doc_1", filename: "a.pdf",
+        status: "ready", pages: 9, bytes: 1, metadata: { year: 2018 }, created_at: "2026-01-01T00:00:00Z" }] });
     }
     if (u.pathname.endsWith("/documents/search")) {
       return json({ object: "document_search", id: "dsrch_1", results: [{ question: "q", documents: [
@@ -268,7 +275,21 @@ test("tools: schema in the description, searches, and pages with pictures", asyn
   assert.match(tools.definitions[0].description, /- ticker: string, on 3 documents; values: "MMM" \(2\), and others/);
   assert.match(tools.definitions[0].description, /- year: number, on 3 documents; 2018 to 2024/);
   assert.deepEqual(tools.openai.map((t) => t.function.name),
-    ["search_documents", "search_pages", "read_pages", "view_pages", "zoom_page"]);
+    ["list_documents", "search_documents", "search_pages", "read_pages", "view_pages", "zoom_page"]);
+
+  let listed = JSON.parse((await tools.run("list_documents", { filter: { year: 2018 }, limit: 5 })).text);
+  assert.deepEqual(listed, { total: 87, documents: [{ document_id: "doc_1", filename: "a.pdf", pages: 9, status: "ready",
+    created_at: "2026-01-01T00:00:00Z", metadata: { year: 2018 } }],
+    more: "Documents 1 to 1 of 87. Next page: offset 1, with the same filter; or narrow the filter." });
+  assert.deepEqual(seen.at(-1).query, { limit: "5", collection_id: "col_1",
+    filter: JSON.stringify({ $and: [{ audited: true }, { year: 2018 }] }) });
+  await tools.run("list_documents", {});
+  assert.equal(seen.at(-1).query.limit, "20");
+  listed = JSON.parse((await tools.run("list_documents", { filter: { year: 2018 }, offset: 40 })).text);
+  assert.equal(seen.at(-1).query.offset, "40");
+  assert.match(listed.more, /^Documents 41 to 41 of 87\. Next page: offset 41/);
+  assert.match((await tools.run("list_documents", { offset: -1 })).text, /error/);
+  assert.match((await tools.run("list_documents", { limit: 500 })).text, /error/);
 
   let out = JSON.parse((await tools.run("search_documents", { questions: ["q"], filter: { year: 2018 }, top_k: "auto" })).text);
   assert.equal(out.results[0].documents[0].document_id, "doc_1");
@@ -291,9 +312,11 @@ test("tools: schema in the description, searches, and pages with pictures", asyn
   assert.deepEqual(result.images.map((i) => i.page), [4, 9]);
   assert.deepEqual(JSON.parse((await tools.run("read_pages", { document_id: "doc_1", pages: [99] })).text), { error: "There is no page 99." });
   assert.match((await tools.run("view_pages", { document_id: "doc_1", pages: [1, 2, 3, 4, 5, 6] })).text, /error/);
-  result = await tools.run("zoom_page", { document_id: "doc_1", page: 4, region: [0.3, 0, 0.6, 1] });
-  assert.deepEqual(JSON.parse(result.text), { document_id: "doc_1", page: 4, region: [0.3, 0, 0.6, 1] });
-  assert.equal(regions.at(-1), "0.3,0,0.6,1");
-  assert.equal(result.anthropic()[1].text, "Page 4 of doc_1, region [0.3, 0, 0.6, 1]:");
-  assert.match((await tools.run("zoom_page", { document_id: "doc_1", page: 4, region: [0, 1] })).text, /error/);
+  result = await tools.run("zoom_page", { document_id: "doc_1", page: 4, box: { y0: 0.3, x0: 0, x1: 1, y1: 0.6 } });
+  assert.deepEqual(JSON.parse(result.text), { document_id: "doc_1", page: 4, box: { x0: 0, y0: 0.3, x1: 1, y1: 0.6 } });
+  assert.equal(boxes.at(-1), "0,0.3,1,0.6");
+  assert.equal(result.anthropic()[1].text, "Page 4 of doc_1, x0 0, y0 0.3, x1 1, y1 0.6:");
+  for (const bad of [[0, 0.3, 1, 0.6], { x0: "x", y0: 0, x1: 1, y1: 1 }, { x0: 0, y0: 0, x1: 1 }]) {
+    assert.match((await tools.run("zoom_page", { document_id: "doc_1", page: 4, box: bad })).text, /error/);
+  }
 });

@@ -1,6 +1,6 @@
 // The Page Search API client: upload PDFs, then search their pages with up to 10 questions at once.
 
-export const VERSION = "0.6.0";
+export const VERSION = "0.7.0";
 export const DEFAULT_BASE_URL = "https://api.search.pageindex.ai/v1";
 const API_KEY_ENV = "PAGEINDEX_SEARCH_API_KEY";
 // Retried, after a short wait that doubles: the server was busy or briefly unreachable.
@@ -194,6 +194,10 @@ type Request = <T>(
 export interface ListPage<T> {
   data: T[];
   has_more: boolean;
+  /** How many there are in all. */
+  total: number;
+  /** How many come before this page. */
+  offset: number;
   /** The page after this one, or null at the end. */
   nextPage(): Promise<ListPage<T> | null>;
 }
@@ -207,16 +211,16 @@ export type CollectionPage = ListPage<Collection>;
  * What a list() returns: await it for one page, or loop over it with for await to see every item, the pages after
  * the first fetched as they are needed.
  */
-export class Paged<T extends { id: string }> implements PromiseLike<ListPage<T>>, AsyncIterable<T> {
+export class Paged<T> implements PromiseLike<ListPage<T>>, AsyncIterable<T> {
   private first?: Promise<ListPage<T>>;
 
-  constructor(private readonly load: (after?: string) => Promise<{ data: T[]; has_more: boolean }>,
-              private readonly after?: string) {}
+  constructor(private readonly load: (offset: number) => Promise<{ data: T[]; has_more: boolean; total: number }>,
+              private readonly offset = 0) {}
 
   then<A = ListPage<T>, B = never>(
     resolved?: ((page: ListPage<T>) => A | PromiseLike<A>) | null, rejected?: ((reason: unknown) => B | PromiseLike<B>) | null,
   ): Promise<A | B> {
-    return (this.first ??= this.page(this.after)).then(resolved, rejected);
+    return (this.first ??= this.page(this.offset)).then(resolved, rejected);
   }
 
   catch<B = never>(rejected?: ((reason: unknown) => B | PromiseLike<B>) | null): Promise<ListPage<T> | B> {
@@ -231,10 +235,10 @@ export class Paged<T extends { id: string }> implements PromiseLike<ListPage<T>>
     for (let page: ListPage<T> | null = await this; page; page = await page.nextPage()) yield* page.data;
   }
 
-  private async page(after?: string): Promise<ListPage<T>> {
-    const { data, has_more } = await this.load(after);
-    const last = data[data.length - 1];
-    return { data, has_more, nextPage: () => (has_more && last ? this.page(last.id) : Promise.resolve(null)) };
+  private async page(offset: number): Promise<ListPage<T>> {
+    const { data, has_more, total } = await this.load(offset);
+    const next = offset + data.length;
+    return { data, has_more, total, offset, nextPage: () => (has_more && data.length ? this.page(next) : Promise.resolve(null)) };
   }
 }
 
@@ -307,20 +311,20 @@ export class Documents {
   }
 
   /**
-   * Your documents, newest first, or those in a collection, or whose metadata meets filter; limit (1 to 100) a page;
-   * after: the last id of the page before.
+   * Your documents, newest first, or those in a collection, or whose metadata meets filter: limit (1 to 100) of
+   * them, after the first offset.
    *
-   *     for await (const doc of client.documents.list()) ...   // every document, a page at a time
-   *     const page = await client.documents.list({ limit: 10 }); // one page: page.data, page.has_more
+   *     for await (const doc of client.documents.list()) ...                // every document, a page at a time
+   *     const page = await client.documents.list({ limit: 10, offset: 20 }); // the third page: page.data, page.total
    */
-  list(options: { limit?: number; after?: string; collection?: Collection | string; filter?: Filter } = {}): DocumentList {
+  list(options: { limit?: number; offset?: number; collection?: Collection | string; filter?: Filter } = {}): DocumentList {
     const limit = options.limit ?? 20;
     const collection_id = options.collection === undefined ? undefined : id(options.collection);
     const filter = options.filter === undefined ? undefined : JSON.stringify(options.filter);
     return new DocumentList(
-      (after) => this.request<{ data: Document[]; has_more: boolean }>(
-        "GET", "/documents", { query: { limit, after, collection_id, filter } }),
-      options.after,
+      (offset) => this.request<{ data: Document[]; has_more: boolean; total: number }>(
+        "GET", "/documents", { query: { limit, offset: offset || undefined, collection_id, filter } }),
+      options.offset,
     );
   }
 
@@ -342,11 +346,11 @@ export class Documents {
     return out.data;
   }
 
-  /** A page as PNG bytes, no side past 1568 pixels; with region, [top, left, bottom, right] as fractions of the
-   * page, only that part of it, drawn sharper: to read small print. */
-  pageImage(document: Document | string, page: number, options: { region?: number[] } = {}): Promise<Uint8Array> {
+  /** A page as PNG bytes, no side past 1568 pixels; with box, [x0, y0, x1, y1] as fractions of the page's width and
+   * height from its top left, only that part of it, drawn sharper: to read small print. */
+  pageImage(document: Document | string, page: number, options: { box?: number[] } = {}): Promise<Uint8Array> {
     return this.request<Uint8Array>("GET", `/documents/${encodeURIComponent(id(document))}/pages/${page}/image`, {
-      raw: true, query: { region: options.region?.join(",") },
+      raw: true, query: { box: options.box?.join(",") },
     });
   }
 
@@ -395,12 +399,13 @@ export class Collections {
     return this.request<Collection>("POST", "/collections", { json: { name } });
   }
 
-  /** Your collections, newest first, limit (1 to 100) a page. for await over it for every collection. */
-  list(options: { limit?: number; after?: string } = {}): CollectionList {
+  /** Your collections, newest first: limit (1 to 100) of them, after the first offset. for await over it for every collection. */
+  list(options: { limit?: number; offset?: number } = {}): CollectionList {
     const limit = options.limit ?? 20;
     return new CollectionList(
-      (after) => this.request<{ data: Collection[]; has_more: boolean }>("GET", "/collections", { query: { limit, after } }),
-      options.after,
+      (offset) => this.request<{ data: Collection[]; has_more: boolean; total: number }>(
+        "GET", "/collections", { query: { limit, offset: offset || undefined } }),
+      options.offset,
     );
   }
 
@@ -543,7 +548,7 @@ export class PageSearch {
 
   /**
    * Tools for an LLM agent over a collection, documents whose metadata meets filter, or all of yours:
-   * search_documents, search_pages, read_pages and view_pages. Their descriptions hold the metadata schema, read
+   * list_documents, search_documents, search_pages, read_pages, view_pages and zoom_page. Their descriptions hold the metadata schema, read
    * now, so the agent can write filters: pass tools.definitions (or tools.openai) to the model, and
    * await tools.run(name, input) for its tool calls.
    */
@@ -654,6 +659,7 @@ async function parse<T>(response: Response): Promise<T> {
 }
 
 export { PageImage, ToolResult, Tools } from "./tools.js";
+export type { Box } from "./tools.js";
 import { Tools } from "./tools.js";
 
 export default PageSearch;

@@ -1,5 +1,5 @@
 /**
- * Tools an LLM agent can call: find which documents answer, search the pages of the ones it picks (with their
+ * Tools an LLM agent can call: list documents by their metadata, find which documents answer, search the pages of the ones it picks (with their
  * text), read pages, with pictures of those best seen, and zoom in on a part of a page too small to read.
  *
  *     const tools = await client.tools({ collection: filings });
@@ -13,11 +13,19 @@ import type { Collection, Filter, PageSearch, PageText, Schema } from "./index.j
 const MAX_PAGES_READ = 20; // pages one read_pages call may read
 const MAX_IMAGES = 5; // pictures one read_pages call may give: each is some thousands of tokens
 const MAX_QUESTIONS = 10; // questions one search may ask
+const MAX_LISTED = 100; // documents one list_documents call may list
 
-const REGION = {
-  type: "array", items: { type: "number", minimum: 0, maximum: 1 }, minItems: 4, maxItems: 4,
-  description: "[top, left, bottom, right] as fractions of the page's height and width, from 0 to 1: " +
-    "[0.3, 0, 0.6, 1] is the band from 30% to 60% of the way down, full width.",
+const CORNERS = ["x0", "y0", "x1", "y1"] as const;
+/** Part of a page: x0, y0 its top left corner, x1, y1 its bottom right, as fractions of the page from its top left. */
+export type Box = Record<(typeof CORNERS)[number], number>;
+
+const BOX = {
+  type: "object",
+  properties: Object.fromEntries(CORNERS.map((k) => [k, { type: "number", minimum: 0, maximum: 1 }])),
+  required: [...CORNERS], additionalProperties: false,
+  description: "The part to see, as fractions of the page: x from 0 at its left edge to 1 at its right, y from 0 at " +
+    "its top to 1 at its bottom; x0, y0 the top left corner, x1, y1 the bottom right. " +
+    '{"x0": 0, "y0": 0.3, "x1": 1, "y1": 0.6} is the band from 30% to 60% of the way down, full width.',
 };
 
 const QUESTIONS = {
@@ -36,13 +44,14 @@ export interface ToolDefinition {
   input_schema: Record<string, unknown>;
 }
 
-/** A page as PNG bytes, or, with region, part of it. */
+/** A page as PNG bytes, or, with box, part of it. */
 export class PageImage {
-  constructor(readonly documentId: string, readonly page: number, readonly png: Uint8Array, readonly region?: number[]) {}
+  constructor(readonly documentId: string, readonly page: number, readonly png: Uint8Array, readonly box?: Box) {}
 
   /** What the picture is, to put before it: "Page 7 of doc_...:". */
   get label(): string {
-    const part = this.region ? `, region [${this.region.join(", ")}]` : "";
+    const box = this.box;
+    const part = box ? ", " + CORNERS.map((k) => `${k} ${box[k]}`).join(", ") : "";
     return `Page ${this.page} of ${this.documentId}${part}:`;
   }
 
@@ -107,7 +116,7 @@ function auto(value: unknown): number | undefined {
 }
 
 /**
- * search_documents, search_pages, read_pages, view_pages and zoom_page over a scope: a collection, documents whose
+ * list_documents, search_documents, search_pages, read_pages, view_pages and zoom_page over a scope: a collection, documents whose
  * metadata meets a filter, or all of yours. The metadata schema is read once, when made; make new ones when the documents
  * change.
  */
@@ -121,7 +130,8 @@ export class Tools {
     readonly schema: Schema,
   ) {
     this.definitions = [
-      this.searchDocumentsTool(), this.searchPagesTool(), this.readPagesTool(), this.viewPagesTool(), this.zoomPageTool(),
+      this.listDocumentsTool(), this.searchDocumentsTool(), this.searchPagesTool(), this.readPagesTool(),
+      this.viewPagesTool(), this.zoomPageTool(),
     ];
   }
 
@@ -141,21 +151,39 @@ export class Tools {
     }));
   }
 
+  private listDocumentsTool(): ToolDefinition {
+    return {
+      name: "list_documents",
+      description: `List the documents, of ${this.schema.documents}, whose metadata meets a filter, newest first, each ` +
+        "with its id, file name, page count, upload time and metadata, and how many match in all. Free. When the question says which documents it is about in " +
+        "terms the metadata holds, find them here and search their pages with search_pages; use search_documents, " +
+        "which is priced, only when a filter cannot pick them out: none match, too many do, or the question says only " +
+        "what it asks.\n\n" + describe(this.schema) + "\n\n" + FILTERS,
+      input_schema: {
+        type: "object",
+        properties: {
+          filter: { type: "object", description: "Only documents whose metadata meets this; without it, all." },
+          limit: { type: "integer", minimum: 1, maximum: MAX_LISTED, description: "At most this many documents (20 by default)." },
+          offset: { type: "integer", minimum: 0, description: "Skip this many first, for the next page: the offset a list gave back." },
+        },
+      },
+    };
+  }
+
   private searchDocumentsTool(): ToolDefinition {
     return {
       name: "search_documents",
       description: `Find which of ${this.schema.documents} documents likely answer each question, most relevant first, ` +
-        "with each one's relevance (0 to 1), page count and metadata. Narrow them with a metadata filter when the " +
-        "question names something the metadata holds, such as a company or a year. Then call search_pages with the " +
-        "documents worth reading. Searching a document's pages is priced by its pages, so search the most relevant " +
-        "documents first, and others only when the question needs them or those did not answer. " +
-        'Use top_k "auto": it returns the documents likely to help, which is best.\n\n' +
-        describe(this.schema) + "\n\n" + FILTERS,
+        "with each one's relevance (0 to 1), page count and metadata; always at least one. Priced by the documents it " +
+        "looks at: when a metadata filter alone picks the documents, use list_documents, which is free, and when it " +
+        "narrows them, pass it here. Then call search_pages with the documents worth reading. Searching a document's " +
+        "pages is priced by its pages, so search the most relevant documents first, and others only when the question " +
+        'needs them or those did not answer. Use top_k "auto": it returns the documents likely to help, which is best.',
       input_schema: {
         type: "object",
         properties: {
           questions: QUESTIONS,
-          filter: { type: "object", description: "Only documents whose metadata meets this." },
+          filter: { type: "object", description: "Only documents whose metadata meets this, written as for list_documents." },
           top_k: topK("documents"),
         },
         required: ["questions"],
@@ -235,9 +263,9 @@ export class Tools {
         properties: {
           document_id: { type: "string" },
           page: { type: "integer", minimum: 1 },
-          region: REGION,
+          box: BOX,
         },
-        required: ["document_id", "page", "region"],
+        required: ["document_id", "page", "box"],
       },
     };
   }
@@ -252,6 +280,7 @@ export class Tools {
       input = { ...rest, questions: question };
     }
     try {
+      if (name === "list_documents") return await this.listDocuments(input);
       if (name === "search_documents") return new ToolResult(JSON.stringify(await this.searchDocuments(input)));
       if (name === "search_pages") return new ToolResult(JSON.stringify(await this.searchPages(input)));
       if (name === "read_pages") return await this.pages(input, MAX_PAGES_READ, (p) => p.read === "image");
@@ -264,11 +293,38 @@ export class Tools {
     }
   }
 
+  private async listDocuments(input: Record<string, unknown>): Promise<ToolResult> {
+    const limit = input.limit === undefined || input.limit === null ? 20 : Number(input.limit);
+    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_LISTED) {
+      return failed(`Bad input for list_documents: limit is 1 to ${MAX_LISTED}.`);
+    }
+    const offset = input.offset === undefined || input.offset === null ? 0 : Number(input.offset);
+    if (!Number.isInteger(offset) || offset < 0) return failed("Bad input for list_documents: offset is 0 or more.");
+    const page = await this.client.documents.list({
+      limit, offset, collection: this.collection, filter: this.scope(input.filter as Filter | undefined),
+    });
+    const last = page.offset + page.data.length;
+    return new ToolResult(JSON.stringify({
+      total: page.total,
+      documents: page.data.map((d) => ({
+        document_id: d.id, filename: d.filename, pages: d.pages, status: d.status, created_at: d.created_at,
+        metadata: d.metadata,
+      })),
+      ...(page.has_more && page.data.length ? {
+        more: `Documents ${page.offset + 1} to ${last} of ${page.total}. Next page: offset ${last}, with the same ` +
+          "filter; or narrow the filter.",
+      } : {}),
+    }));
+  }
+
+  /** The filter the agent gave, within the one the tools were made with. */
+  private scope(filter: Filter | undefined): Filter | undefined {
+    return filter === undefined ? this.filter : this.filter === undefined ? filter : { $and: [this.filter, filter] };
+  }
+
   private async searchDocuments(input: Record<string, unknown>): Promise<unknown> {
-    const filter = input.filter as Filter | undefined;
-    const scope = filter === undefined ? this.filter : this.filter === undefined ? filter : { $and: [this.filter, filter] };
     const found = await this.client.documents.search(asked(input.questions), {
-      collection: this.collection, filter: scope, topK: auto(input.top_k),
+      collection: this.collection, filter: this.scope(input.filter as Filter | undefined), topK: auto(input.top_k),
     });
     return {
       results: found.results.map((a) => ({
@@ -304,13 +360,17 @@ export class Tools {
   private async zoom(input: Record<string, unknown>): Promise<ToolResult> {
     const documentId = String(input.document_id ?? "");
     const page = Number(input.page);
-    const region = Array.isArray(input.region) ? input.region.map(Number) : [];
-    if (!documentId || !Number.isInteger(page) || region.length !== 4 || region.some((v) => !Number.isFinite(v))) {
-      return failed("Name a document_id, a page, and a region of four numbers: [top, left, bottom, right].");
+    const given = input.box;
+    const named = given !== null && typeof given === "object" && !Array.isArray(given)
+      && Object.keys(given).length === CORNERS.length && CORNERS.every((k) => k in given);
+    const box = named ? Object.fromEntries(CORNERS.map((k) => [k, Number((given as Box)[k])])) as Box : undefined;
+    if (!documentId || !Number.isInteger(page) || !box || CORNERS.some((k) => !Number.isFinite(box[k]))) {
+      return failed('Name a document_id, a page, and a box: {"x0": ..., "y0": ..., "x1": ..., "y1": ...}, fractions ' +
+        "of the page.");
     }
-    const png = await this.client.documents.pageImage(documentId, page, { region });
-    return new ToolResult(JSON.stringify({ document_id: documentId, page, region }),
-      [new PageImage(documentId, page, png, region)]);
+    const png = await this.client.documents.pageImage(documentId, page, { box: CORNERS.map((k) => box[k]) });
+    return new ToolResult(JSON.stringify({ document_id: documentId, page, box }),
+      [new PageImage(documentId, page, png, box)]);
   }
 
   /** The pages' text, and pictures of those pictured picks. */
