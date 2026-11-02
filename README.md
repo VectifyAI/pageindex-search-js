@@ -127,8 +127,8 @@ For OpenAI, pass `tools.openai`; `tools.run()` gives `.text` and `.images`, each
 | `tools({ collection, filter })` | Tools for an LLM agent: `.definitions` (Anthropic), `.openai`, and `.run(name, input)`. |
 | `documents.update(document, { metadata })` | Set metadata keys; `null` removes one. |
 | `collections.schema(collection)`, `documents.schema({ collection, filter })` | The metadata keys the documents have: each key's types, how many documents have it, its least and greatest numbers and commonest strings. Counted as they are now; nothing is enforced. |
-| `collections.create(name)`, `.list()`, `.get(id)`, `.rename(collection, name)`, `.delete(collection)` | Named groups of your documents. Deleting one leaves its documents. |
-| `collections.add(collection, documents)`, `.remove(collection, document)` | Put documents in a collection, or take one out. `documents.upload(file, { collection })` puts a new one in. |
+| `collections.create(name)`, `.list()`, `.get(id)`, `.rename(collection, name)`, `.delete(collection)` | Named groups of your documents, as folders: a document is in at most one. Deleting one deletes its documents. |
+| `collections.add(collection, documents)`, `.remove(collection, document)` | Move documents into a collection, from any other, or one out of it, into none. `documents.upload(file, { collection })` makes a new one in it. |
 | `usage({ start, end })` | Uploads, searches and cost by day, your credit and stored pages. |
 
 In 0.4, `search(document, questions)` became `search(questions, { document })`, and each answer lists

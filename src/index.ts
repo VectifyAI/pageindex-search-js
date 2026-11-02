@@ -1,6 +1,6 @@
 // The Page Search API client: upload PDFs, then search their pages with up to 10 questions at once.
 
-export const VERSION = "0.9.0";
+export const VERSION = "0.10.0";
 export const DEFAULT_BASE_URL = "https://api.search.pageindex.ai/v1";
 const API_KEY_ENV = "PAGEINDEX_SEARCH_API_KEY";
 // Retried, after a short wait that doubles: the server was busy or briefly unreachable.
@@ -18,8 +18,9 @@ export interface Document {
   bytes: number;
   created_at: string;
   error?: string; // when failed
-  duplicate?: boolean; // on uploads: the same file was already uploaded; this is that document
+  duplicate?: boolean; // on uploads: the same file was already uploaded, to the same collection; this is that document
   metadata: Metadata; // your own keys
+  collection_id: string | null; // the collection it is in: at most one
 }
 
 /** A document's own keys: strings, numbers and booleans, at most 16. */
@@ -423,19 +424,22 @@ export class Collections {
     return this.request<Schema>("GET", `/collections/${encodeURIComponent(id(collection))}/schema`);
   }
 
-  /** Deletes the collection; its documents stay. */
+  /** Deletes the collection and its documents, as a folder with its files. Move any to keep out of it first. */
   async delete(collection: Collection | string): Promise<void> {
     await this.request("DELETE", `/collections/${encodeURIComponent(id(collection))}`);
   }
 
-  /** Puts documents in the collection (up to 1,000 at once); those already in it stay. */
+  /**
+   * Moves documents into the collection (up to 1,000 at once), from whichever they are in: a document is in at most one.
+   * None moves when one is the same file as a document already there (PageSearchError, document_exists).
+   */
   add(collection: Collection | string, documents: (Document | string)[]): Promise<Collection> {
     return this.request<Collection>("POST", `/collections/${encodeURIComponent(id(collection))}/documents`, {
       json: { document_ids: documents.map(id) },
     });
   }
 
-  /** Takes a document out of the collection; the document stays. */
+  /** Moves a document out of the collection, into none; the document stays. */
   remove(collection: Collection | string, document: Document | string): Promise<Collection> {
     return this.request<Collection>(
       "DELETE", `/collections/${encodeURIComponent(id(collection))}/documents/${encodeURIComponent(id(document))}`);
