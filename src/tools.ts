@@ -39,6 +39,8 @@ const QUESTIONS = {
     "together the questions you have of the same documents.",
 };
 
+const COLLECTION_ID = { type: "string", description: "Only documents in this collection, its id from list_collections." };
+
 const FILTERS = 'Conditions: {"key": value} equals; {"key": {"$ne"|"$in"|"$nin"|"$gt"|"$gte"|"$lt"|"$lte": ...}}; ' +
   '{"$and": [...]} and {"$or": [...]} combine filters. Values match exactly, type included: "2018" is not 2018.';
 
@@ -121,8 +123,8 @@ function auto(value: unknown): number | undefined {
 }
 
 /**
- * list_documents, search_documents, search_pages, read_pages, view_pages and zoom_page over a scope: a collection, documents whose
- * metadata meets a filter, or all of yours. The metadata schema is read once, when made; make new ones when the documents
+ * list_collections, list_documents, search_documents, search_pages, read_pages, view_pages and zoom_page over a scope: a
+ * collection, documents whose metadata meets a filter, or all of yours; with all of them, the agent picks a collection itself. The metadata schema is read once, when made; make new ones when the documents
  * change.
  */
 export class Tools {
@@ -135,8 +137,8 @@ export class Tools {
     readonly schema: Schema,
   ) {
     this.definitions = [
-      this.listDocumentsTool(), this.searchDocumentsTool(), this.searchPagesTool(), this.readPagesTool(),
-      this.viewPagesTool(), this.zoomPageTool(),
+      this.listCollectionsTool(), this.listDocumentsTool(), this.searchDocumentsTool(), this.searchPagesTool(),
+      this.readPagesTool(), this.viewPagesTool(), this.zoomPageTool(),
     ];
   }
 
@@ -156,6 +158,22 @@ export class Tools {
     }));
   }
 
+  private listCollectionsTool(): ToolDefinition {
+    return {
+      name: "list_collections",
+      description: "List the collections, named groups of documents, newest first, each with its id, name and how many " +
+        "documents it holds, and how many there are in all. Free. When the question names a collection, find its id " +
+        "here and pass it as collection_id to list_documents or search_documents.",
+      input_schema: {
+        type: "object",
+        properties: {
+          limit: { type: "integer", minimum: 1, maximum: MAX_LISTED, description: "At most this many collections (20 by default)." },
+          offset: { type: "integer", minimum: 0, description: "Skip this many first, for the next page: the offset a list gave back." },
+        },
+      },
+    };
+  }
+
   private listDocumentsTool(): ToolDefinition {
     return {
       name: "list_documents",
@@ -163,11 +181,12 @@ export class Tools {
         "with its id, file name, page count, upload time and metadata, and how many match in all. Free. When the question says which documents it is about in " +
         "terms the metadata holds, find them here and search their pages with search_pages; use search_documents, " +
         "which is priced, only when a filter cannot pick them out: none match, too many do, or the question says only " +
-        "what it asks.\n\n" + describe(this.schema) + "\n\n" + FILTERS,
+        "what it asks. Pass collection_id for one collection's documents.\n\n" + describe(this.schema) + "\n\n" + FILTERS,
       input_schema: {
         type: "object",
         properties: {
           filter: { type: "object", description: "Only documents whose metadata meets this; without it, all." },
+          collection_id: COLLECTION_ID,
           limit: { type: "integer", minimum: 1, maximum: MAX_LISTED, description: "At most this many documents (20 by default)." },
           offset: { type: "integer", minimum: 0, description: "Skip this many first, for the next page: the offset a list gave back." },
         },
@@ -191,6 +210,7 @@ export class Tools {
         properties: {
           questions: QUESTIONS,
           filter: { type: "object", description: "Only documents whose metadata meets this, written as for list_documents." },
+          collection_id: COLLECTION_ID,
           top_k: topK("documents"),
         },
         required: ["questions"],
@@ -292,6 +312,7 @@ export class Tools {
       input = { ...rest, questions: question };
     }
     try {
+      if (name === "list_collections") return await this.listCollections(input);
       if (name === "list_documents") return await this.listDocuments(input);
       if (name === "search_documents") return new ToolResult(JSON.stringify(await this.searchDocuments(input)));
       if (name === "search_pages") return new ToolResult(JSON.stringify(await this.searchPages(input)));
@@ -305,15 +326,30 @@ export class Tools {
     }
   }
 
-  private async listDocuments(input: Record<string, unknown>): Promise<ToolResult> {
-    const limit = input.limit === undefined || input.limit === null ? 20 : Number(input.limit);
-    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_LISTED) {
-      return failed(`Bad input for list_documents: limit is 1 to ${MAX_LISTED}.`);
+  private async listCollections(input: Record<string, unknown>): Promise<ToolResult> {
+    const paging = paged("list_collections", input);
+    if (paging instanceof ToolResult) return paging;
+    if (this.collection !== undefined) { // the tools see this collection only
+      const c = await this.client.collections.get(this.collection);
+      return new ToolResult(JSON.stringify({ total: 1, collections: [{ collection_id: c.id, name: c.name, documents: c.documents }] }));
     }
-    const offset = input.offset === undefined || input.offset === null ? 0 : Number(input.offset);
-    if (!Number.isInteger(offset) || offset < 0) return failed("Bad input for list_documents: offset is 0 or more.");
+    const page = await this.client.collections.list(paging);
+    const last = page.offset + page.data.length;
+    return new ToolResult(JSON.stringify({
+      total: page.total,
+      collections: page.data.map((c) => ({ collection_id: c.id, name: c.name, documents: c.documents })),
+      ...(page.has_more && page.data.length
+        ? { more: `Collections ${page.offset + 1} to ${last} of ${page.total}. Next page: offset ${last}.` } : {}),
+    }));
+  }
+
+  private async listDocuments(input: Record<string, unknown>): Promise<ToolResult> {
+    const paging = paged("list_documents", input);
+    if (paging instanceof ToolResult) return paging;
+    const collection = this.within(input.collection_id);
+    if (collection instanceof ToolResult) return collection;
     const page = await this.client.documents.list({
-      limit, offset, collection: this.collection, filter: this.scope(input.filter as Filter | undefined),
+      ...paging, collection, filter: this.scope(input.filter as Filter | undefined),
     });
     const last = page.offset + page.data.length;
     return new ToolResult(JSON.stringify({
@@ -329,14 +365,25 @@ export class Tools {
     }));
   }
 
+  /** The collection the agent named, within the one the tools were made with. */
+  private within(collectionId: unknown): string | undefined | ToolResult {
+    const named = typeof collectionId === "string" && collectionId ? collectionId : undefined;
+    if (this.collection !== undefined && named !== undefined && named !== this.collection) {
+      return failed(`These tools see only collection ${this.collection}.`);
+    }
+    return named ?? this.collection;
+  }
+
   /** The filter the agent gave, within the one the tools were made with. */
   private scope(filter: Filter | undefined): Filter | undefined {
     return filter === undefined ? this.filter : this.filter === undefined ? filter : { $and: [this.filter, filter] };
   }
 
   private async searchDocuments(input: Record<string, unknown>): Promise<unknown> {
+    const collection = this.within(input.collection_id);
+    if (collection instanceof ToolResult) return JSON.parse(collection.text);
     const found = await this.client.documents.search(asked(input.questions), {
-      collection: this.collection, filter: this.scope(input.filter as Filter | undefined), topK: auto(input.top_k),
+      collection, filter: this.scope(input.filter as Filter | undefined), topK: auto(input.top_k),
     });
     const doc = (d: DocumentMatch) => ({
       document_id: d.document_id, filename: d.filename, pages: d.pages, relevance: d.relevance, metadata: d.metadata,
@@ -412,6 +459,15 @@ export class Tools {
     };
     return new ToolResult(JSON.stringify(out), shown.map((page, i) => new PageImage(documentId, page, pngs[i])));
   }
+}
+
+/** A list's limit and offset from the agent's input, or what is wrong with them. */
+function paged(tool: string, input: Record<string, unknown>): { limit: number; offset: number } | ToolResult {
+  const limit = input.limit === undefined || input.limit === null ? 20 : Number(input.limit);
+  if (!Number.isInteger(limit) || limit < 1 || limit > MAX_LISTED) return failed(`Bad input for ${tool}: limit is 1 to ${MAX_LISTED}.`);
+  const offset = input.offset === undefined || input.offset === null ? 0 : Number(input.offset);
+  if (!Number.isInteger(offset) || offset < 0) return failed(`Bad input for ${tool}: offset is 0 or more.`);
+  return { limit, offset };
 }
 
 function failed(message: string): ToolResult {

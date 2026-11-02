@@ -247,6 +247,9 @@ test("tools: schema in the description, searches, and pages with pictures", asyn
         { key: "ticker", types: ["string"], documents: 3, values: [{ value: "MMM", documents: 2 }] },
         { key: "year", types: ["number"], documents: 3, min: 2018, max: 2024 }] });
     }
+    if (u.pathname === "/v1/collections/col_1") {
+      return json({ object: "collection", id: "col_1", name: "filings", documents: 3, created_at: "2026-01-01T00:00:00Z" });
+    }
     if (u.pathname.endsWith("/image")) {
       boxes.push(u.searchParams.get("box"));
       return new Response(new Uint8Array([137, 80, 78, 71]), { status: 200 });
@@ -274,10 +277,10 @@ test("tools: schema in the description, searches, and pages with pictures", asyn
   };
   const client = new PageSearch({ apiKey: "pis_live_x", fetch });
   const tools = await client.tools({ collection: "col_1", filter: { audited: true } });
-  assert.match(tools.definitions[0].description, /- ticker: string, on 3 documents; values: "MMM" \(2\), and others/);
-  assert.match(tools.definitions[0].description, /- year: number, on 3 documents; 2018 to 2024/);
+  assert.match(tools.definitions[1].description, /- ticker: string, on 3 documents; values: "MMM" \(2\), and others/);
+  assert.match(tools.definitions[1].description, /- year: number, on 3 documents; 2018 to 2024/);
   assert.deepEqual(tools.openai.map((t) => t.function.name),
-    ["list_documents", "search_documents", "search_pages", "read_pages", "view_pages", "zoom_page"]);
+    ["list_collections", "list_documents", "search_documents", "search_pages", "read_pages", "view_pages", "zoom_page"]);
 
   let listed = JSON.parse((await tools.run("list_documents", { filter: { year: 2018 }, limit: 5 })).text);
   assert.deepEqual(listed, { total: 87, documents: [{ document_id: "doc_1", filename: "a.pdf", pages: 9, status: "ready",
@@ -292,6 +295,13 @@ test("tools: schema in the description, searches, and pages with pictures", asyn
   assert.match(listed.more, /^Documents 41 to 41 of 87\. Next page: offset 41/);
   assert.match((await tools.run("list_documents", { offset: -1 })).text, /error/);
   assert.match((await tools.run("list_documents", { limit: 500 })).text, /error/);
+  // Made for a collection: list_collections gives that one, and another collection is refused.
+  assert.deepEqual(JSON.parse((await tools.run("list_collections", {})).text),
+    { total: 1, collections: [{ collection_id: "col_1", name: "filings", documents: 3 }] });
+  await tools.run("list_documents", { collection_id: "col_1" });
+  assert.equal(seen.at(-1).query.collection_id, "col_1");
+  assert.match((await tools.run("list_documents", { collection_id: "col_2" })).text, /only collection col_1/);
+  assert.match((await tools.run("search_documents", { question: "q", collection_id: "col_2" })).text, /only collection col_1/);
 
   let out = JSON.parse((await tools.run("search_documents", { questions: ["q"], filter: { year: 2018 }, top_k: "auto" })).text);
   assert.equal(out.results[0].documents[0].document_id, "doc_1");
@@ -326,4 +336,32 @@ test("tools: schema in the description, searches, and pages with pictures", asyn
   for (const bad of [[0, 0.3, 1, 0.6], { x0: "x", y0: 0, x1: 1, y1: 1 }, { x0: 0, y0: 0, x1: 1 }]) {
     assert.match((await tools.run("zoom_page", { document_id: "doc_1", page: 4, box: bad })).text, /error/);
   }
+});
+
+test("tools: made for all documents, list the collections and search one the agent names", async () => {
+  const seen = [];
+  const fetch = async (url, init) => {
+    const u = new URL(String(url));
+    seen.push({ path: u.pathname, query: Object.fromEntries(u.searchParams), body: init.body ? JSON.parse(init.body) : null });
+    const json = (body) => new Response(JSON.stringify(body), { status: 200 });
+    if (u.pathname.endsWith("/schema")) return json({ object: "schema", collection_id: null, documents: 5, keys: [] });
+    if (u.pathname === "/v1/collections") {
+      return json({ object: "list", has_more: true, total: 3, data: [
+        { object: "collection", id: "col_1", name: "filings", documents: 40 },
+        { object: "collection", id: "col_2", name: "contracts", documents: 12 }] });
+    }
+    if (u.pathname === "/v1/documents") return json({ object: "list", has_more: false, total: 0, data: [] });
+    return json({ object: "document_search", id: "s", results: [{ question: "q", documents: [], more_documents: [] }],
+      failed_documents: [], processing_documents: [] });
+  };
+  const tools = await new PageSearch({ apiKey: "pis_live_x", fetch }).tools();
+  const out = JSON.parse((await tools.run("list_collections", { limit: 2 })).text);
+  assert.deepEqual(out.collections, [{ collection_id: "col_1", name: "filings", documents: 40 },
+    { collection_id: "col_2", name: "contracts", documents: 12 }]);
+  assert.equal(out.more, "Collections 1 to 2 of 3. Next page: offset 2.");
+  await tools.run("list_documents", { collection_id: "col_2" });
+  assert.equal(seen.at(-1).query.collection_id, "col_2");
+  await tools.run("search_documents", { question: "q", collection_id: "col_2" });
+  assert.equal(seen.at(-1).body.collection_id, "col_2");
+  assert.match((await tools.run("list_collections", { limit: 0 })).text, /error/);
 });
