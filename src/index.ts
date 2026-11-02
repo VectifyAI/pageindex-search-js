@@ -1,6 +1,6 @@
 // The Page Search API client: upload PDFs, then search their pages with up to 10 questions at once.
 
-export const VERSION = "0.10.0";
+export const VERSION = "0.11.0";
 export const DEFAULT_BASE_URL = "https://api.search.pageindex.ai/v1";
 const API_KEY_ENV = "PAGEINDEX_SEARCH_API_KEY";
 // Retried, after a short wait that doubles: the server was busy or briefly unreachable.
@@ -561,6 +561,24 @@ export class PageSearch {
     return Tools.create(this, options);
   }
 
+  /**
+   * The citations in an agent's answer, written as CITATIONS asks, each with the documentId of the document it names:
+   * found among your documents by file name, the newest when several share it. Then show the page, or the part of it
+   * named, with documents.pageImage(c.documentId, c.page, { box: c.box }).
+   */
+  async citations(text: string): Promise<Citation[]> {
+    const found = citations(text);
+    const names = new Set(found.map((c) => c.document));
+    const ids = new Map<string, string>();
+    for (let offset = 0; [...names].some((n) => !ids.has(n)); offset += 100) {
+      const page = await this.request<{ data: Document[]; has_more: boolean }>(
+        "GET", "/documents", { query: { limit: 100, offset: offset || undefined } });
+      for (const doc of page.data) if (doc.filename && !ids.has(doc.filename)) ids.set(doc.filename, doc.id);
+      if (!page.has_more) break;
+    }
+    return found.map((c) => ({ ...c, documentId: ids.get(c.document) ?? null }));
+  }
+
   // Account
 
   /**
@@ -665,6 +683,9 @@ async function parse<T>(response: Response): Promise<T> {
 
 export { PageImage, ToolResult, Tools } from "./tools.js";
 export type { Box } from "./tools.js";
+export { CITATIONS, citations } from "./citations.js";
+export type { Citation } from "./citations.js";
+import { type Citation, citations } from "./citations.js";
 import { Tools } from "./tools.js";
 
 export default PageSearch;

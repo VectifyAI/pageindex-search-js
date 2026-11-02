@@ -113,6 +113,20 @@ for (const block of response.content) {
 
 For OpenAI, pass `tools.openai`; `tools.run()` gives `.text` and `.images`, each image with `.dataUrl`.
 
+### Show where the answer is
+
+Add `CITATIONS` to the agent's instructions, and it cites each sentence with `<cite doc="report.pdf" page="12"/>`,
+with `box="x0,y0,x1,y1"` for the part of the page it came from. `client.citations(answer)` finds them:
+
+```ts
+import { CITATIONS } from "@pageindex/search";
+
+const instructions = "Answer only from the documents. " + CITATIONS;
+for (const c of await client.citations(answer)) {
+  const png = await client.documents.pageImage(c.documentId, c.page, { box: c.box ?? undefined }); // the page, or that part
+}
+```
+
 ## Reference
 
 | | |

@@ -365,3 +365,30 @@ test("tools: made for all documents, list the collections and search one the age
   assert.equal(seen.at(-1).body.collection_id, "col_2");
   assert.match((await tools.run("list_collections", { limit: 0 })).text, /error/);
 });
+
+test("citations: the tags an answer holds, as models write them", async () => {
+  const { CITATIONS, citations } = await import("../dist/esm/index.js");
+  const answer = 'Revenue was $215.9 billion. <cite doc="NVDA_2026_10K.pdf" page="51"/> By segment. ' +
+    "<cite doc='NVDA_2026_10K.pdf' page='77' box='0.1,0.2,0.9,0.5'/> Both years: `<cite doc=a.pdf pages=3-4 />` " +
+    '<CITE DOC="b.pdf" PAGE="7, 9"></CITE> <cite doc="b.pdf" page="2" box="0.5,0.5,0.2,0.9"/>';
+  const found = citations(answer);
+  assert.deepEqual(found.map((c) => [c.document, c.page, c.box]), [
+    ["NVDA_2026_10K.pdf", 51, null], ["NVDA_2026_10K.pdf", 77, [0.1, 0.2, 0.9, 0.5]], ["a.pdf", 3, null], ["a.pdf", 4, null],
+    ["b.pdf", 7, null], ["b.pdf", 9, null], ["b.pdf", 2, null]]); // the last box is not a box
+  assert.equal(answer.slice(found[0].start, found[0].end), '<cite doc="NVDA_2026_10K.pdf" page="51"/>');
+  assert.equal(answer.slice(found[2].start, found[2].end), "`<cite doc=a.pdf pages=3-4 />`");
+  assert.deepEqual(citations("No citation here."), []);
+  assert.ok(CITATIONS.includes("<cite") && CITATIONS.includes("box="));
+});
+
+test("client.citations finds each document by file name, the newest of those named alike", async () => {
+  const doc = (id, filename) => ({ ...DOC, id, filename });
+  const { fetch, seen } = fake(
+    [200, { object: "list", data: [doc("doc_new", "a.pdf"), doc("doc_b", "b.pdf")], has_more: true, total: 4 }],
+    [200, { object: "list", data: [doc("doc_old", "a.pdf"), doc("doc_c", "c.pdf")], has_more: false, total: 4 }],
+  );
+  const client = new PageSearch({ apiKey: "pis_live_x", fetch, maxRetries: 0 });
+  const found = await client.citations('<cite doc="a.pdf" page="1"/> <cite doc="c.pdf" page="2"/> <cite doc="x.pdf" page="3"/>');
+  assert.deepEqual(found.map((c) => [c.document, c.documentId]), [["a.pdf", "doc_new"], ["c.pdf", "doc_c"], ["x.pdf", null]]);
+  assert.deepEqual(seen.map((r) => new URL(r.url).searchParams.get("offset")), [null, "100"]);
+});
