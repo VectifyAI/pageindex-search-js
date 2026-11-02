@@ -8,7 +8,7 @@
  *       if (block.type === "tool_use") content = (await tools.run(block.name, block.input)).anthropic();
  *     }
  */
-import type { Collection, Filter, PageSearch, PageText, Schema } from "./index.js";
+import type { Collection, DocumentMatch, Filter, PageSearch, PageText, Schema } from "./index.js";
 
 const MAX_PAGES_READ = 20; // pages one read_pages call may read
 const MAX_IMAGES = 5; // pictures one read_pages call may give: each is some thousands of tokens
@@ -179,7 +179,9 @@ export class Tools {
     return {
       name: "search_documents",
       description: `Find which of ${this.schema.documents} documents likely answer each question, most relevant first, ` +
-        "with each one's relevance (0 to 1), page count and metadata; always at least one. Priced by the documents it " +
+        "with each one's relevance (0 to 1), page count and metadata. When none is likely to answer, it lists none: " +
+        "the documents most likely do not answer the question; more_documents lists the next most relevant, with " +
+        "their relevance, to search only if one plausibly does. Priced by the documents it " +
         "looks at: when a metadata filter alone picks the documents, use list_documents, which is free, and when it " +
         "narrows them, pass it here. Then call search_pages with the documents worth reading. Searching a document's " +
         "pages is priced by its pages, so search the most relevant documents first, and others only when the question " +
@@ -200,7 +202,9 @@ export class Tools {
     return {
       name: "search_pages",
       description: "Find the pages of one document that help answer each question, most relevant first, each with its " +
-        "relevance (0 to 1) and text. Pages are numbered from 1. It is priced by the document's pages: search the " +
+        "relevance (0 to 1) and text. It finds pages by what they say and cannot tell where a page is, so for " +
+        "questions about order or position (the first figure, page 5, the last section), read the pages in order " +
+        "with read_pages instead. Pages are numbered from 1. It is priced by the document's pages: search the " +
         "documents search_documents ranks most relevant first, calling it for each at the same time, and others only " +
         "when needed; to ask again in other words, ask only of the documents still missing the answer. A page whose read is \"image\" " +
         "is a picture, such as a scan or a chart: its text may be incomplete or empty, so look at it with " +
@@ -224,8 +228,10 @@ export class Tools {
     return {
       name: "read_pages",
       description: "Read pages of a document, numbered from 1: their text, with a picture of any page whose read is " +
-        '"image" (a scan or a chart, whose text may be incomplete). Use it for pages search_pages found that are ' +
-        "pictures, or for the pages around one, such as where a table goes on. At most " +
+        '"image" (a scan or a chart, whose text may be incomplete). Free. It reads pages in order: use it, not ' +
+        "search_pages, for questions about order or position; each page's read shows which are pictures, such as " +
+        "charts. Use it too for pages search_pages found that are pictures, or for the pages around one, such as " +
+        "where a table goes on. At most " +
         `${MAX_PAGES_READ} pages at a time, and at most ${MAX_IMAGES} of them pictures: in a scanned document every ` +
         `page is a picture, so read ${MAX_IMAGES} at a time. If a picture's small print or figures are hard to read, ` +
         "zoom in with zoom_page.",
@@ -244,8 +250,9 @@ export class Tools {
     return {
       name: "view_pages",
       description: `See pages of a document as pictures, with their text: up to ${MAX_IMAGES} at a time, numbered ` +
-        "from 1. Use it where how a page looks matters, such as a table's layout or a chart on a page of text. If " +
-        "small print or figures are hard to read, zoom in with zoom_page before answering.",
+        "from 1. Use it where how a page looks matters, such as a table's layout or a chart on a page of text. " +
+        "Free, but pictures cost the model many tokens: look only at the pages you need. If small print or figures " +
+        "are hard to read, zoom in with zoom_page before answering.",
       input_schema: {
         type: "object",
         properties: {
@@ -331,13 +338,16 @@ export class Tools {
     const found = await this.client.documents.search(asked(input.questions), {
       collection: this.collection, filter: this.scope(input.filter as Filter | undefined), topK: auto(input.top_k),
     });
+    const doc = (d: DocumentMatch) => ({
+      document_id: d.document_id, filename: d.filename, pages: d.pages, relevance: d.relevance, metadata: d.metadata,
+    });
     return {
       results: found.results.map((a) => ({
         question: a.question,
-        documents: a.documents.map((d) => ({
-          document_id: d.document_id, filename: d.filename, pages: d.pages, relevance: d.relevance, metadata: d.metadata,
-        })),
+        documents: a.documents.map(doc),
+        ...(a.more_documents?.length ? { more_documents: a.more_documents.map(doc) } : {}),
       })),
+      ...cost(found.usage),
     };
   }
 
@@ -362,6 +372,7 @@ export class Tools {
             ? { more_pages: d.more_pages.map((p) => ({ page: p.page, relevance: p.relevance, read: p.read })) } : {}),
         };
       }),
+      ...cost(found.usage),
     };
   }
 
@@ -413,4 +424,9 @@ function toBase64(bytes: Uint8Array): string {
   let binary = "";
   for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
   return btoa(binary);
+}
+
+/** What a search cost, in US dollars, for the output: priced searches say so. */
+function cost(usage: { cost_usd: number } | null | undefined): { cost_usd?: number } {
+  return usage ? { cost_usd: usage.cost_usd } : {};
 }

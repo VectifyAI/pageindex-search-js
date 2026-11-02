@@ -262,13 +262,15 @@ test("tools: schema in the description, searches, and pages with pictures", asyn
     }
     if (u.pathname.endsWith("/documents/search")) {
       return json({ object: "document_search", id: "dsrch_1", results: [{ question: "q", documents: [
-        { document_id: "doc_1", relevance: 0.9, filename: "a.pdf", pages: 10, metadata: { year: 2018 } }] }],
+        { document_id: "doc_1", relevance: 0.9, filename: "a.pdf", pages: 10, metadata: { year: 2018 } }],
+        more_documents: [{ document_id: "doc_2", relevance: 0.1, filename: "b.pdf", pages: 4, metadata: {} }] }],
         failed_documents: [], processing_documents: [] });
     }
     return json({ object: "search", id: "srch_1", results: [{ question: "q", documents: [
       { document_id: "doc_1", filename: "a.pdf", pages: [{ page: 4, relevance: 1, read: "image", text: "Chart" }],
         more_pages: [{ page: 5, relevance: 0.2, read: "text" }] }] }],
-      failed_documents: [], processing_documents: [] });
+      failed_documents: [], processing_documents: [],
+      usage: { documents: 0, pages: 10, questions: 1, cost_usd: 0.001, balance_usd: 4.5 } });
   };
   const client = new PageSearch({ apiKey: "pis_live_x", fetch });
   const tools = await client.tools({ collection: "col_1", filter: { audited: true } });
@@ -293,12 +295,15 @@ test("tools: schema in the description, searches, and pages with pictures", asyn
 
   let out = JSON.parse((await tools.run("search_documents", { questions: ["q"], filter: { year: 2018 }, top_k: "auto" })).text);
   assert.equal(out.results[0].documents[0].document_id, "doc_1");
+  assert.deepEqual(out.results[0].more_documents, [{ document_id: "doc_2", filename: "b.pdf", pages: 4, relevance: 0.1, metadata: {} }]);
+  assert.equal(out.cost_usd, undefined); // none given
   assert.deepEqual(seen.at(-1).body, { questions: ["q"], collection_id: "col_1", filter: { $and: [{ audited: true }, { year: 2018 }] } });
 
   out = JSON.parse((await tools.run("search_pages", { question: "q", document_id: "doc_1", top_k: "auto" })).text);
   assert.deepEqual(out.results[0].pages, [{ page: 4, relevance: 1, read: "image", text: "Chart",
     note: "A picture: its text may be incomplete or wrong. See it with read_pages before answering from it." }]);
   assert.deepEqual(out.results[0].more_pages, [{ page: 5, relevance: 0.2, read: "text" }]);
+  assert.equal(out.cost_usd, 0.001);
   assert.deepEqual(seen.at(-1).body, { questions: ["q"], document_id: "doc_1", include_text: true });
   assert.match((await tools.run("search_pages", { question: "q", document_ids: ["doc_1"] })).text, /error/);
   await tools.run("search_pages", { question: "q", document_id: "doc_1", top_k: 3 });

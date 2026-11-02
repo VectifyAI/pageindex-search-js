@@ -1,6 +1,6 @@
 // The Page Search API client: upload PDFs, then search their pages with up to 10 questions at once.
 
-export const VERSION = "0.7.1";
+export const VERSION = "0.8.2";
 export const DEFAULT_BASE_URL = "https://api.search.pageindex.ai/v1";
 const API_KEY_ENV = "PAGEINDEX_SEARCH_API_KEY";
 // Retried, after a short wait that doubles: the server was busy or briefly unreachable.
@@ -96,7 +96,8 @@ export interface DocumentMatch {
 
 export interface DocumentAnswer {
   question: string;
-  documents: DocumentMatch[]; // most relevant first
+  documents: DocumentMatch[]; // most relevant first; without topK, those likely to help, which may be none
+  more_documents?: DocumentMatch[]; // without topK, the next most relevant, for when those listed do not answer or none is
 }
 
 export interface DocumentSearchResult {
