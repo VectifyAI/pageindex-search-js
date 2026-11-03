@@ -367,7 +367,7 @@ test("tools: made for all documents, list the collections and search one the age
 });
 
 test("citations: the tags an answer holds, as models write them", async () => {
-  const { CITATIONS, citations } = await import("../dist/esm/index.js");
+  const { CITATIONS, CITATIONS_WITH_BOXES, citations } = await import("../dist/esm/index.js");
   const answer = 'Revenue was $215.9 billion. <cite doc="NVDA_2026_10K.pdf" page="51"/> By segment. ' +
     "<cite doc='NVDA_2026_10K.pdf' page='77' box='0.1,0.2,0.9,0.5'/> Both years: `<cite doc=a.pdf pages=3-4 />` " +
     '<CITE DOC="b.pdf" PAGE="7, 9"></CITE> <cite doc="b.pdf" page="2" box="0.5,0.5,0.2,0.9"/>';
@@ -378,7 +378,8 @@ test("citations: the tags an answer holds, as models write them", async () => {
   assert.equal(answer.slice(found[0].start, found[0].end), '<cite doc="NVDA_2026_10K.pdf" page="51"/>');
   assert.equal(answer.slice(found[2].start, found[2].end), "`<cite doc=a.pdf pages=3-4 />`");
   assert.deepEqual(citations("No citation here."), []);
-  assert.ok(CITATIONS.includes("<cite") && CITATIONS.includes("box="));
+  assert.ok(CITATIONS.includes("<cite") && !CITATIONS.includes("box="));
+  assert.ok(CITATIONS_WITH_BOXES.startsWith(CITATIONS) && CITATIONS_WITH_BOXES.includes("box=") && CITATIONS_WITH_BOXES.includes("view_pages"));
 });
 
 test("client.citations finds each document by file name, the newest of those named alike", async () => {

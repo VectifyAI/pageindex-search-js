@@ -1,6 +1,6 @@
 // The Page Search API client: upload PDFs, then search their pages with up to 10 questions at once.
 
-export const VERSION = "0.11.0";
+export const VERSION = "0.11.1";
 export const DEFAULT_BASE_URL = "https://api.search.pageindex.ai/v1";
 const API_KEY_ENV = "PAGEINDEX_SEARCH_API_KEY";
 // Retried, after a short wait that doubles: the server was busy or briefly unreachable.
@@ -562,7 +562,7 @@ export class PageSearch {
   }
 
   /**
-   * The citations in an agent's answer, written as CITATIONS asks, each with the documentId of the document it names:
+   * The citations in an agent's answer, written as CITATIONS (or CITATIONS_WITH_BOXES) asks, each with the documentId of the document it names:
    * found among your documents by file name, the newest when several share it. Then show the page, or the part of it
    * named, with documents.pageImage(c.documentId, c.page, { box: c.box }).
    */
@@ -683,7 +683,7 @@ async function parse<T>(response: Response): Promise<T> {
 
 export { PageImage, ToolResult, Tools } from "./tools.js";
 export type { Box } from "./tools.js";
-export { CITATIONS, citations } from "./citations.js";
+export { CITATIONS, CITATIONS_WITH_BOXES, citations } from "./citations.js";
 export type { Citation } from "./citations.js";
 import { type Citation, citations } from "./citations.js";
 import { Tools } from "./tools.js";
