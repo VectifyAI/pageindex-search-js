@@ -406,7 +406,7 @@ test("outlines: one page a line; turned on a collection at a time; tools read th
     const json = (b, status = 200) => new Response(JSON.stringify(b), { status });
     if (u.pathname === "/v1/documents/doc_1/outline") {
       return json({ object: "outline", document_id: "doc_1", status: "ready", data: [
-        { title: "Outlook", page: 12 }, { title: "Group financial targets", page: 12 }, { title: "Who we are", page: 13 }] });
+        { page: 12, headings: ["Outlook", "Group financial targets"] }, { page: 13, headings: ["Who we are"] }] });
     }
     if (u.pathname === "/v1/documents/doc_2/outline") return json({ object: "outline", document_id: "doc_2", status: "off", data: [] });
     if (u.pathname === "/v1/documents/outlines" && init.method === "PUT") return json(summary(body.on, 0, { collection_id: body.collection_id }));
@@ -423,7 +423,7 @@ test("outlines: one page a line; turned on a collection at a time; tools read th
   const outline = await client.documents.outline("doc_1");
   assert.equal(String(outline), "p.12 Outlook | Group financial targets\np.13 Who we are");
   assert.equal(outline.status, "ready");
-  assert.equal(outline.headings[2].title, "Who we are");
+  assert.deepEqual(outline.pages[1].headings, ["Who we are"]);
   await client.documents.makeOutline("doc_1");
   assert.deepEqual(seen.at(-1).method + " " + seen.at(-1).path, "POST /v1/documents/doc_1/outline");
   const turned = await client.collections.outlines("col_off", { on: true });

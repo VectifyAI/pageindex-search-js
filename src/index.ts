@@ -1,6 +1,6 @@
 // The Page Search API client: upload PDFs, then search their pages with up to 10 questions at once.
 
-export const VERSION = "0.13.0";
+export const VERSION = "0.14.0";
 export const DEFAULT_BASE_URL = "https://api.search.pageindex.ai/v1";
 const API_KEY_ENV = "PAGEINDEX_SEARCH_API_KEY";
 // Retried, after a short wait that doubles: the server was busy or briefly unreachable.
@@ -56,15 +56,15 @@ export interface Bookmark {
   page: number; // the page it goes to, numbered from 1
 }
 
-/** A heading of a document's outline. */
-export interface Heading {
-  title: string; // as printed, numbering included
-  page: number; // the page it is on, numbered from 1
+/** A page of a document's outline, and its headings. */
+export interface OutlinePage {
+  page: number; // numbered from 1
+  headings: string[]; // as printed, numbering included, in order
 }
 
 /**
- * A document's outline, from client.documents.outline(): every heading in it and the page it is on. String() of it
- * gives it one page a line, "p.12 Outlook | Group financial targets", as an agent reads it.
+ * A document's outline, from client.documents.outline(): its pages with headings, in order, each with its headings.
+ * String() of it gives it one page a line, "p.12 Outlook | Group financial targets", as an agent reads it.
  */
 export class Outline {
   constructor(
@@ -72,13 +72,11 @@ export class Outline {
     /** "ready"; "preparing" while it is made; "off" while it has none and its collection makes none; "unpaid" when your
      * credit did not cover it; "failed" when it could not be made (not charged). */
     readonly status: "ready" | "preparing" | "off" | "unpaid" | "failed",
-    readonly headings: Heading[],
+    readonly pages: OutlinePage[],
   ) {}
 
   toString(): string {
-    const pages = new Map<number, string[]>();
-    for (const h of this.headings) pages.set(h.page, [...(pages.get(h.page) ?? []), h.title]);
-    return [...pages.entries()].sort((a, b) => a[0] - b[0]).map(([page, titles]) => `p.${page} ${titles.join(" | ")}`).join("\n");
+    return this.pages.map((p) => `p.${p.page} ${p.headings.join(" | ")}`).join("\n");
   }
 }
 
@@ -775,7 +773,7 @@ async function parse<T>(response: Response): Promise<T> {
   });
 }
 
-type OutlineBody = { document_id: string; status: Outline["status"]; data?: Heading[] };
+type OutlineBody = { document_id: string; status: Outline["status"]; data?: OutlinePage[] };
 
 function outlineOf(body: OutlineBody): Outline {
   return new Outline(body.document_id, body.status, body.data ?? []);
