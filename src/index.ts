@@ -1,6 +1,6 @@
 // The Page Search API client: upload PDFs, then search their pages with up to 10 questions at once.
 
-export const VERSION = "0.11.1";
+export const VERSION = "0.13.0";
 export const DEFAULT_BASE_URL = "https://api.search.pageindex.ai/v1";
 const API_KEY_ENV = "PAGEINDEX_SEARCH_API_KEY";
 // Retried, after a short wait that doubles: the server was busy or briefly unreachable.
@@ -47,6 +47,58 @@ export interface Page {
   read: "text" | "image";
   /** With includeText. */
   text?: string;
+}
+
+/** A PDF's own bookmark, from client.documents.bookmarks(). */
+export interface Bookmark {
+  title: string;
+  level: number; // 1 for the top
+  page: number; // the page it goes to, numbered from 1
+}
+
+/** A heading of a document's outline. */
+export interface Heading {
+  title: string; // as printed, numbering included
+  page: number; // the page it is on, numbered from 1
+}
+
+/**
+ * A document's outline, from client.documents.outline(): every heading in it and the page it is on. String() of it
+ * gives it one page a line, "p.12 Outlook | Group financial targets", as an agent reads it.
+ */
+export class Outline {
+  constructor(
+    readonly documentId: string,
+    /** "ready"; "preparing" while it is made; "off" while it has none and its collection makes none; "unpaid" when your
+     * credit did not cover it; "failed" when it could not be made (not charged). */
+    readonly status: "ready" | "preparing" | "off" | "unpaid" | "failed",
+    readonly headings: Heading[],
+  ) {}
+
+  toString(): string {
+    const pages = new Map<number, string[]>();
+    for (const h of this.headings) pages.set(h.page, [...(pages.get(h.page) ?? []), h.title]);
+    return [...pages.entries()].sort((a, b) => a[0] - b[0]).map(([page, titles]) => `p.${page} ${titles.join(" | ")}`).join("\n");
+  }
+}
+
+/** Outlines of a collection (whether it makes them), of a document, or of the account: how many documents have theirs,
+ * and what making the rest costs. */
+export interface Outlines {
+  object: "outlines";
+  collection_id?: string;
+  document_id?: string;
+  collections?: { id: string; name: string }[]; // the account's: those that make outlines
+  on: boolean;
+  documents: number; // ready documents
+  pages: number;
+  ready: number; // documents whose outline is made
+  preparing: number;
+  unpaid: number; // waiting for credit
+  failed: number;
+  pages_left: number; // pages of the documents without one
+  price_per_1000_pages: number;
+  cost_to_finish: number; // US dollars to make the rest
 }
 
 /** A page's text, from client.documents.pages(). */
@@ -340,12 +392,32 @@ export class Documents {
     return this.request<Schema>("GET", "/documents/schema", { query: { collection_id, filter } });
   }
 
-  /** The text of up to 20 pages, numbered from 1, in the order named, each with how it is best read. */
-  async pages(document: Document | string, pages: number[]): Promise<PageText[]> {
+  /** The text of up to 50 pages, numbered from 1, each with how it is best read: those from start to end, then those
+   * named, in the order named. */
+  async pages(document: Document | string, pages: number[] = [], options: { start?: number; end?: number } = {}): Promise<PageText[]> {
     const out = await this.request<{ data: PageText[] }>("GET", `/documents/${encodeURIComponent(id(document))}/pages`, {
-      query: { pages: pages.join(",") },
+      query: { pages: pages.length ? pages.join(",") : undefined, start: options.start, end: options.end },
     });
     return out.data;
+  }
+
+  /** The PDF's own bookmarks, in their order: each with its title, its level (from 1) and the page it goes to (from 1).
+   * None, if the PDF has none. Free. */
+  async bookmarks(document: Document | string): Promise<Bookmark[]> {
+    const out = await this.request<{ data: Bookmark[] }>("GET", `/documents/${encodeURIComponent(id(document))}/bookmarks`);
+    return out.data;
+  }
+
+  /** The document's outline: every heading in it and the page it is on; String() of it, one page a line. Made for the
+   * documents of collections that make outlines (collections.outlines), or by makeOutline. */
+  async outline(document: Document | string): Promise<Outline> {
+    return outlineOf(await this.request<OutlineBody>("GET", `/documents/${encodeURIComponent(id(document))}/outline`));
+  }
+
+  /** Makes the document's outline, whatever its collection, paid once by its pages as it is made: "preparing" until it
+   * is. One made already is as it was. */
+  async makeOutline(document: Document | string): Promise<Outline> {
+    return outlineOf(await this.request<OutlineBody>("POST", `/documents/${encodeURIComponent(id(document))}/outline`));
   }
 
   /** A page as PNG bytes, no side past 1568 pixels; with box, [x0, y0, x1, y1] as fractions of the page's width and
@@ -437,6 +509,18 @@ export class Collections {
     return this.request<Collection>("POST", `/collections/${encodeURIComponent(id(collection))}/documents`, {
       json: { document_ids: documents.map(id) },
     });
+  }
+
+  /**
+   * The collection's outlines: whether it makes them, how many of its documents have theirs, and what making the rest
+   * costs. With on: true, turns them on: its documents get theirs, each paid once by its pages as it is made, and so
+   * does each document added after; on: false turns them off, keeping those made.
+   */
+  outlines(collection: Collection | string, options: { on?: boolean } = {}): Promise<Outlines> {
+    if (options.on === undefined) {
+      return this.request<Outlines>("GET", "/documents/outlines", { query: { collection_id: id(collection) } });
+    }
+    return this.request<Outlines>("PUT", "/documents/outlines", { json: { on: options.on, collection_id: id(collection) } });
   }
 
   /** Moves a document out of the collection, into none; the document stays. */
@@ -531,6 +615,8 @@ export class PageSearch {
     options: {
       document?: Document | string; documentIds?: (Document | string)[]; collection?: Collection | string; filter?: Filter;
       maxDocuments?: number; documentTopK?: number; topK?: number; includeText?: boolean; idempotencyKey?: string;
+      /** With one document: search only the pages from startPage to endPage (from 1, included), charged only for them. */
+      startPage?: number; endPage?: number;
     } = {},
   ): Promise<SearchResult> {
     if (typeof options === "string" || Array.isArray(options) || (typeof questions === "object" && !Array.isArray(questions))) {
@@ -545,6 +631,8 @@ export class PageSearch {
     if (options.documentTopK !== undefined) body.document_top_k = options.documentTopK;
     if (options.topK !== undefined) body.top_k = options.topK;
     if (options.includeText) body.include_text = true;
+    if (options.startPage !== undefined) body.start_page = options.startPage;
+    if (options.endPage !== undefined) body.end_page = options.endPage;
     return this.request<SearchResult>("POST", "/search", {
       json: body,
       headers: { "Idempotency-Key": options.idempotencyKey ?? newKey() },
@@ -555,9 +643,10 @@ export class PageSearch {
    * Tools for an LLM agent over a collection, documents whose metadata meets filter, or all of yours:
    * list_documents, search_documents, search_pages, read_pages, view_pages and zoom_page. Their descriptions hold the metadata schema, read
    * now, so the agent can write filters: pass tools.definitions (or tools.openai) to the model, and
-   * await tools.run(name, input) for its tool calls.
+   * await tools.run(name, input) for its tool calls. get_document_outline too when there are outlines to read: the
+   * collection makes them, or (without one) some of your documents have theirs; outline: true or false says so instead.
    */
-  tools(options: { collection?: Collection | string; filter?: Filter } = {}): Promise<Tools> {
+  tools(options: { collection?: Collection | string; filter?: Filter; outline?: boolean } = {}): Promise<Tools> {
     return Tools.create(this, options);
   }
 
@@ -587,6 +676,11 @@ export class PageSearch {
    */
   usage(options: { start?: string; end?: string } = {}): Promise<Usage> {
     return this.request<Usage>("GET", "/usage", { query: options });
+  }
+
+  /** Your outlines: the collections that make them (collections), and how many documents have theirs. */
+  outlines(): Promise<Outlines> {
+    return this.request<Outlines>("GET", "/documents/outlines");
   }
 
   // Plumbing
@@ -679,6 +773,12 @@ async function parse<T>(response: Response): Promise<T> {
     code: error.code,
     requestId: error.request_id ?? requestId,
   });
+}
+
+type OutlineBody = { document_id: string; status: Outline["status"]; data?: Heading[] };
+
+function outlineOf(body: OutlineBody): Outline {
+  return new Outline(body.document_id, body.status, body.data ?? []);
 }
 
 export { PageImage, ToolResult, Tools } from "./tools.js";

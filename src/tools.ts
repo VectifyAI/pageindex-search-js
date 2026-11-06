@@ -125,7 +125,8 @@ function auto(value: unknown): number | undefined {
 /**
  * list_collections, list_documents, search_documents, search_pages, read_pages, view_pages and zoom_page over a scope: a
  * collection, documents whose metadata meets a filter, or all of yours; with all of them, the agent picks a collection itself. The metadata schema is read once, when made; make new ones when the documents
- * change.
+ * change. get_document_outline too when there are outlines to read (outline: true or false says so instead): the agent
+ * then finds the main parts by the outline and the mentions scattered elsewhere by search, as measured best.
  */
 export class Tools {
   readonly definitions: ToolDefinition[];
@@ -135,20 +136,26 @@ export class Tools {
     private readonly collection: string | undefined,
     private readonly filter: Filter | undefined,
     readonly schema: Schema,
+    /** Whether the tools read outlines: get_document_outline is among them. */
+    readonly outline: boolean,
   ) {
     this.definitions = [
-      this.listCollectionsTool(), this.listDocumentsTool(), this.searchDocumentsTool(), this.searchPagesTool(),
+      this.listCollectionsTool(), this.listDocumentsTool(), this.searchDocumentsTool(),
+      ...(outline ? [this.getDocumentOutlineTool()] : []), this.searchPagesTool(),
       this.readPagesTool(), this.viewPagesTool(), this.zoomPageTool(),
     ];
   }
 
-  static async create(client: PageSearch, options: { collection?: Collection | string; filter?: Filter } = {}): Promise<Tools> {
+  static async create(
+    client: PageSearch, options: { collection?: Collection | string; filter?: Filter; outline?: boolean } = {},
+  ): Promise<Tools> {
     const collection = options.collection === undefined ? undefined
       : typeof options.collection === "string" ? options.collection : options.collection.id;
     const schema = collection !== undefined && options.filter === undefined
       ? await client.collections.schema(collection)
       : await client.documents.schema({ collection, filter: options.filter });
-    return new Tools(client, collection, options.filter, schema);
+    const outline = options.outline ?? await hasOutlines(client, collection);
+    return new Tools(client, collection, options.filter, schema, outline);
   }
 
   /** The definitions in OpenAI's function format. */
@@ -231,16 +238,35 @@ export class Tools {
         'read_pages. Use top_k "auto": it returns the pages likely to help, which is best, and a number brings back ' +
         "many pages of text. The most relevant pages usually hold the answer: once they do, stop searching. If they " +
         "do not, more_pages lists the next most relevant: read those with read_pages, which is free, before " +
-        "searching again.",
+        "searching again." +
+        (this.outline ? " With start_page and end_page it can leave out the parts a document's outline shows plainly " +
+          "cannot hold the answer, such as exhibits, signatures and certifications at the end; when in doubt whether a " +
+          "part could mention the topic, keep it." : ""),
       input_schema: {
         type: "object",
         properties: {
           questions: QUESTIONS,
           document_id: { type: "string", description: "The document to search, from search_documents." },
           top_k: topK("pages"),
+          start_page: { type: "integer", minimum: 1, description: "Search from this page (from 1); without it, from the first." },
+          end_page: { type: "integer", minimum: 1, description: "Search to this page, included; without it, to the last. A part of the document costs only its pages." },
         },
         required: ["questions", "document_id"],
       },
+    };
+  }
+
+  private getDocumentOutlineTool(): ToolDefinition {
+    return {
+      name: "get_document_outline",
+      description: "Every heading in a document, one page a line, each page's headings after its number " +
+        '("p.12 Outlook | Group financial targets"): a part runs from its heading to the next. Free. Use it to see the ' +
+        "document's structure and find the main parts that should hold the answer, then read their pages with " +
+        "read_pages. search_pages finds the mentions scattered elsewhere, under headings that do not name the topic, " +
+        "such as a figure repeated in another section, a note or a table's footnote: when the question asks for every " +
+        "item of a kind, or everything the document says about a topic, do both. A document without an outline says " +
+        "so: search and read it instead.",
+      input_schema: { type: "object", properties: { document_id: { type: "string" } }, required: ["document_id"] },
     };
   }
 
@@ -316,6 +342,7 @@ export class Tools {
       if (name === "list_documents") return await this.listDocuments(input);
       if (name === "search_documents") return new ToolResult(JSON.stringify(await this.searchDocuments(input)));
       if (name === "search_pages") return new ToolResult(JSON.stringify(await this.searchPages(input)));
+      if (name === "get_document_outline") return new ToolResult(await this.documentOutline(input));
       if (name === "read_pages") return await this.pages(input, MAX_PAGES_READ, (p) => p.read === "image");
       if (name === "view_pages") return await this.pages(input, MAX_IMAGES, () => true);
       if (name === "zoom_page") return await this.zoom(input);
@@ -398,11 +425,22 @@ export class Tools {
     };
   }
 
+  private async documentOutline(input: Record<string, unknown>): Promise<string> {
+    const found = await this.client.documents.outline(String(input.document_id ?? ""));
+    if (found.status === "ready") return String(found) || "The document has no headings.";
+    const why: Record<string, string> = {
+      preparing: "is still being made", off: "is not made: its collection does not make outlines",
+      unpaid: "is not made: the credit did not cover it", failed: "could not be made",
+    };
+    return `This document's outline ${why[found.status] ?? "is not ready"}: find pages with search_pages and read_pages.`;
+  }
+
   private async searchPages(input: Record<string, unknown>): Promise<unknown> {
     const documentId = String(input.document_id ?? "");
     if (!documentId) return { error: "Name the document_id to search." };
     const found = await this.client.search(asked(input.questions), {
       document: documentId, topK: auto(input.top_k), includeText: true,
+      startPage: input.start_page as number | undefined, endPage: input.end_page as number | undefined,
     });
     const first = found.results[0].documents[0];
     return {
@@ -485,4 +523,18 @@ function toBase64(bytes: Uint8Array): string {
 /** What a search cost, in US dollars, for the output: priced searches say so. */
 function cost(usage: { cost_usd: number } | null | undefined): { cost_usd?: number } {
   return usage ? { cost_usd: usage.cost_usd } : {};
+}
+
+/** Whether there are outlines to read: the collection makes them, or (without one) some document has its own. Any
+ * failure to tell, such as an API without outlines, is taken as none: the tools work without them. */
+async function hasOutlines(client: PageSearch, collection: string | undefined): Promise<boolean> {
+  try {
+    if (collection !== undefined) {
+      const found = await client.collections.outlines(collection);
+      return Boolean(found.on || found.ready > 0);
+    }
+    return (await client.outlines()).ready > 0;
+  } catch {
+    return false;
+  }
 }

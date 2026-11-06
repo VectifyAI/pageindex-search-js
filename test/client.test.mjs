@@ -393,3 +393,64 @@ test("client.citations finds each document by file name, the newest of those nam
   assert.deepEqual(found.map((c) => [c.document, c.documentId]), [["a.pdf", "doc_new"], ["c.pdf", "doc_c"], ["x.pdf", null]]);
   assert.deepEqual(seen.map((r) => new URL(r.url).searchParams.get("offset")), [null, "100"]);
 });
+
+test("outlines: one page a line; turned on a collection at a time; tools read them when there are some", async () => {
+  const seen = [];
+  const on = { col_on: true, col_off: false };
+  const summary = (isOn, ready, scope) => ({ object: "outlines", ...scope, on: isOn, documents: 2, pages: 30, ready,
+    preparing: 0, unpaid: 0, failed: 0, pages_left: 30 - 15 * ready, price_per_1000_pages: 1, cost_to_finish: (30 - 15 * ready) / 1000 });
+  const fetch = async (url, init) => {
+    const u = new URL(String(url));
+    const body = init.body ? JSON.parse(init.body) : null;
+    seen.push({ method: init.method, path: u.pathname, query: Object.fromEntries(u.searchParams), body });
+    const json = (b, status = 200) => new Response(JSON.stringify(b), { status });
+    if (u.pathname === "/v1/documents/doc_1/outline") {
+      return json({ object: "outline", document_id: "doc_1", status: "ready", data: [
+        { title: "Outlook", page: 12 }, { title: "Group financial targets", page: 12 }, { title: "Who we are", page: 13 }] });
+    }
+    if (u.pathname === "/v1/documents/doc_2/outline") return json({ object: "outline", document_id: "doc_2", status: "off", data: [] });
+    if (u.pathname === "/v1/documents/outlines" && init.method === "PUT") return json(summary(body.on, 0, { collection_id: body.collection_id }));
+    if (u.pathname === "/v1/documents/outlines") {
+      const col = u.searchParams.get("collection_id");
+      return col ? json(summary(on[col], 0, { collection_id: col })) : json(summary(false, 1, { collections: [] }));
+    }
+    if (u.pathname.endsWith("/schema")) return json({ object: "schema", collection_id: null, documents: 0, keys: [] });
+    if (u.pathname === "/v1/documents/doc_1/bookmarks") return json({ object: "list", document_id: "doc_1", data: [{ title: "Part I", level: 1, page: 4 }] });
+    if (u.pathname === "/v1/documents/doc_1/pages") return json({ object: "list", document_id: "doc_1", data: [] });
+    return json({ error: { code: "not_found", message: u.pathname } }, 404);
+  };
+  const client = new PageSearch({ apiKey: "pis_live_x", fetch, maxRetries: 0 });
+  const outline = await client.documents.outline("doc_1");
+  assert.equal(String(outline), "p.12 Outlook | Group financial targets\np.13 Who we are");
+  assert.equal(outline.status, "ready");
+  assert.equal(outline.headings[2].title, "Who we are");
+  await client.documents.makeOutline("doc_1");
+  assert.deepEqual(seen.at(-1).method + " " + seen.at(-1).path, "POST /v1/documents/doc_1/outline");
+  const turned = await client.collections.outlines("col_off", { on: true });
+  assert.deepEqual([turned.on, turned.collection_id, turned.cost_to_finish], [true, "col_off", 0.03]);
+  assert.deepEqual(seen.at(-1).body, { on: true, collection_id: "col_off" });
+  assert.equal((await client.collections.outlines("col_off")).on, false);
+  // The tool is there when there are outlines to read, and says how to use them with search.
+  const names = (tools) => tools.definitions.map((d) => d.name);
+  const withOutline = await client.tools({ collection: "col_on" });
+  assert.ok(names(withOutline).includes("get_document_outline") && withOutline.outline);
+  assert.match(withOutline.definitions.find((d) => d.name === "search_pages").description, /leave out the parts/);
+  const without = await client.tools({ collection: "col_off" });
+  assert.ok(!names(without).includes("get_document_outline"));
+  assert.doesNotMatch(without.definitions.find((d) => d.name === "search_pages").description, /leave out the parts/);
+  assert.ok(names(await client.tools()).includes("get_document_outline")); // some document has its own
+  assert.ok(!names(await client.tools({ collection: "col_on", outline: false })).includes("get_document_outline"));
+  assert.equal((await withOutline.run("get_document_outline", { document_id: "doc_1" })).text, String(outline));
+  assert.match((await withOutline.run("get_document_outline", { document_id: "doc_2" })).text, /its collection does not make outlines/);
+  // 0.12's: bookmarks, and pages from start to end.
+  assert.deepEqual(await client.documents.bookmarks("doc_1"), [{ title: "Part I", level: 1, page: 4 }]);
+  await client.documents.pages("doc_1", [], { start: 3, end: 5 });
+  assert.deepEqual(seen.at(-1).query, { start: "3", end: "5" });
+});
+
+test("search: a page range of one document", async () => {
+  const { fetch, seen } = fake([200, { object: "search", results: [], usage: {} }]);
+  await new PageSearch({ apiKey: "pis_live_x", fetch }).search("What was revenue?", { document: "doc_1", startPage: 30, endPage: 60 });
+  const body = JSON.parse(seen[0].body);
+  assert.deepEqual([body.document_id, body.start_page, body.end_page], ["doc_1", 30, 60]);
+});

@@ -98,7 +98,9 @@ meets a filter, with your metadata's keys and values in its description, so the 
 `search_documents` (which documents answer a question, for when a filter cannot pick them), `search_pages` (with each
 page's text),
 `read_pages` (text, with a picture of any page that is one), `view_pages` (pages as pictures) and `zoom_page`
-(part of a page, sharper, for small print).
+(part of a page, sharper, for small print). When there are outlines to read (the collection makes them, or some of
+your documents have theirs), an eighth: `get_document_outline` (free: every heading and its page, one page a line), with
+which the agent finds the main parts by the outline and the mentions scattered elsewhere by search.
 
 ```js
 const tools = await client.tools({ collection: reports }); // or { filter }, or neither for all your documents
@@ -112,6 +114,21 @@ for (const block of response.content) {
 ```
 
 For OpenAI, pass `tools.openai`; `tools.run()` gives `.text` and `.images`, each image with `.dataUrl`.
+
+### Outlines
+
+An outline lists every heading in a document and the page it is on. Turn outlines on for a collection, and its
+documents get theirs, as does each one added after; each is made once, paid by its pages (see
+[pricing](https://search.pageindex.ai/pricing)). The agent's tools for that collection then read them.
+
+```js
+await client.collections.outlines(reports, { on: true }); // its documents' outlines are made, a minute or two each
+console.log(String(await client.documents.outline(report))); // p.12 Outlook | Group financial targets
+                                                             // p.13 Who we are | Our strategy | ...
+const tools = await client.tools({ collection: reports });    // with get_document_outline
+```
+
+`documents.makeOutline(document)` makes one document's, whatever its collection.
 
 ### Show where the answer is
 
@@ -134,12 +151,16 @@ for (const c of await client.citations(answer)) {
 | --- | --- |
 | `new PageSearch({ apiKey, baseURL, timeout, maxRetries })` | The key defaults to `PAGEINDEX_SEARCH_API_KEY`; `timeout` is in milliseconds (default 120,000). |
 | `documents.upload(file, { filename, collection, metadata, wait })` | A path, or the file's bytes (`Uint8Array`, `ArrayBuffer`, `Blob`). Resolves to a `Document`, ready to search unless `wait: false`. |
-| `search(questions, { document, documentIds, collection, filter, maxDocuments, documentTopK, topK, includeText, idempotencyKey })` | Up to 10 questions. For each, the pages that help, under the documents they are in: of one document, or across documents (those named, a collection's, those meeting `filter`, or all), whose most relevant are opened: those likely to answer, at most `maxDocuments` (default 3), or exactly `documentTopK`. Each document lists the pages likely to help, or exactly `topK`, each with how it is best read, and with `includeText`, its text; without `topK`, `more_pages` lists the next most relevant, without text. A search retried after a timeout is not charged twice. |
+| `search(questions, { document, documentIds, collection, filter, maxDocuments, documentTopK, topK, includeText, startPage, endPage, idempotencyKey })` | Up to 10 questions. For each, the pages that help, under the documents they are in: of one document, or across documents (those named, a collection's, those meeting `filter`, or all), whose most relevant are opened: those likely to answer, at most `maxDocuments` (default 3), or exactly `documentTopK`. Each document lists the pages likely to help, or exactly `topK`, each with how it is best read, and with `includeText`, its text; without `topK`, `more_pages` lists the next most relevant, without text. With one document, `startPage` and `endPage` (from 1, included) search only those pages, and are charged only for them. A search retried after a timeout is not charged twice. |
 | `documents.search(questions, { documentIds, collection, filter, topK, idempotencyKey })` | Up to 10 questions of your documents (all of them, up to 1,000, those named, or a collection's). Each answer lists the documents likely to hold it, which may be none, or exactly `topK`; without `topK`, `more_documents` lists the next most relevant. Each document is priced at the document search price. |
 | `documents.list({ limit, offset, collection, filter })` | Your documents, newest first, or a collection's, or those whose metadata meets `filter`: `limit` of them after the first `offset`. `for await` over it for every document; `await` it for one page (`data`, `has_more`, `total`: how many in all). |
 | `documents.get(id)`, `documents.delete(document)` | One document; delete one. |
-| `documents.pages(document, pages)`, `documents.pageImage(document, page, { box })` | The text of up to 20 pages, each with how it is best read; a page as PNG bytes, or with `box` ([x0, y0, x1, y1] as fractions of the page from its top left) part of it, sharper. |
-| `tools({ collection, filter })` | Tools for an LLM agent: `.definitions` (Anthropic), `.openai`, and `.run(name, input)`. |
+| `documents.pages(document, pages, { start, end })`, `documents.pageImage(document, page, { box })` | The text of up to 50 pages, each with how it is best read: those from `start` to `end`, then those named in `pages`; a page as PNG bytes, or with `box` ([x0, y0, x1, y1] as fractions of the page from its top left) part of it, sharper. |
+| `documents.bookmarks(document)` | The PDF's own bookmarks, in their order: each with its title, level (from 1) and page. Free. |
+| `tools({ collection, filter, outline })` | Tools for an LLM agent: `.definitions` (Anthropic), `.openai`, and `.run(name, input)`. With `get_document_outline` when there are outlines to read; `outline: true` or `false` says so instead. |
+| `collections.outlines(collection, { on })` | Whether the collection makes outlines, how many of its documents have theirs and what making the rest costs; `on: true` turns them on (its documents' are made, each paid once by its pages, and each added after), `on: false` off. |
+| `outlines()` | Your outlines: the collections that make them, and how many documents have theirs. |
+| `documents.outline(document)`, `documents.makeOutline(document)` | A document's outline: `String()` of it gives every heading one page a line, `.status` (`ready`, `preparing`, `off`, `unpaid`, `failed`) and `.headings`; make one document's, whatever its collection. |
 | `documents.update(document, { metadata })` | Set metadata keys; `null` removes one. |
 | `collections.schema(collection)`, `documents.schema({ collection, filter })` | The metadata keys the documents have: each key's types, how many documents have it, its least and greatest numbers and commonest strings. Counted as they are now; nothing is enforced. |
 | `collections.create(name)`, `.list()`, `.get(id)`, `.rename(collection, name)`, `.delete(collection)` | Named groups of your documents, as folders: a document is in at most one. Deleting one deletes its documents. |
